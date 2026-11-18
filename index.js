@@ -14,32 +14,38 @@ app.use(express.json());
 app.use((_, res, next) => {
   res.setHeader('Access-Control-Allow-Origin',  '*');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-API-Key');
-  res.setHeader('X-Powered-By',                 'multisite-bypass/7.0');
+  res.setHeader('X-Powered-By', 'multisite-bypass/7.0');
   next();
 });
 
-// ── Auth ─────────────────────────────────────────────────────────────────
-const requireKey = (req, res, next) => {
-  const k = req.headers['x-api-key'] || req.query.key;
-  const r = auth.validate(k);
-  if (!r.valid) return res.status(401).json({ success: false, error: r.reason });
-  next();
-};
+// Simple rate limit — IP based, no key needed
+const rateMap = new Map();
+function rateLimit(max = 60, windowMs = 60_000) {
+  return (req, res, next) => {
+    const ip  = (req.headers['x-forwarded-for'] || req.ip || 'x').split(',')[0].trim();
+    const now = Date.now();
+    const rec = rateMap.get(ip) || { n: 0, t: now };
+    if (now - rec.t > windowMs) { rateMap.set(ip, { n: 1, t: now }); return next(); }
+    if (++rec.n > max) return res.status(429).json({ success: false, error: `Rate limit: ${max} req/min` });
+    rateMap.set(ip, rec);
+    next();
+  };
+}
+
+// Master key check — only for admin routes
 const requireMaster = (req, res, next) => {
-  if (!auth.isMaster(req.headers['x-api-key'] || req.query.key))
-    return res.status(403).json({ success: false, error: 'Master key required' });
+  const k = req.headers['x-api-key'] || req.query.key;
+  const masterKey = process.env.MASTER_API_KEY || 'changeme-master-key-set-in-env';
+  if (k !== masterKey) return res.status(403).json({ success: false, error: 'Master key required' });
   next();
 };
 
 // ══════════════════════════════════════════════════════════════════════════
-// CORE ENDPOINTS
+// PUBLIC ENDPOINTS — NO AUTH NEEDED
 // ══════════════════════════════════════════════════════════════════════════
 
-/**
- * GET /bypass?url=...
- * Universal bypass — works for ALL supported sites
- */
-app.get('/bypass', requireKey, async (req, res) => {
+// Main bypass endpoint — no key needed
+app.get('/bypass', rateLimit(60), async (req, res) => {
   const { url, nocache } = req.query;
   if (!url) {
     return res.status(400).json({
@@ -49,7 +55,7 @@ app.get('/bypass', requireKey, async (req, res) => {
         '/bypass?url=https://hubcloud.pw/drive/ABC123',
         '/bypass?url=https://gofile.io/d/pVawQzDG',
         '/bypass?url=https://hubdrive.blog/file/3002211248',
-        '/bypass?url=https://new3.multicloudlinks.com/view/f533404ca2?...',
+        '/bypass?url=https://new3.multicloudlinks.com/view/f533404ca2',
         '/bypass?url=https://new2.drivehub.dad/file/4346143',
       ],
     });
@@ -65,18 +71,8 @@ app.get('/bypass', requireKey, async (req, res) => {
   }
 });
 
-// Keep /hubcloud alias for backward compat
-app.get('/hubcloud', requireKey, async (req, res) => {
-  req.url = '/bypass' + (req.url.includes('?') ? req.url.slice(req.url.indexOf('?') - 1) : '');
-  res.redirect(307, `/bypass?url=${encodeURIComponent(req.query.url || '')}&key=${req.query.key || ''}`);
-});
-
-/**
- * POST /batch
- * Process multiple URLs — any mix of supported sites
- * Body: { urls: ["https://..."], nocache: false }
- */
-app.post('/batch', requireKey, async (req, res) => {
+// Batch — no key needed
+app.post('/batch', rateLimit(10), async (req, res) => {
   const { urls, nocache = false } = req.body;
   if (!Array.isArray(urls) || !urls.length) return res.status(400).json({ error: '{ urls: ["..."] }' });
   if (urls.length > 10) return res.status(400).json({ error: 'Max 10 URLs per batch' });
@@ -97,61 +93,21 @@ app.post('/batch', requireKey, async (req, res) => {
   });
 });
 
-/**
- * GET /prefetch?url=...
- * Warm the cache in background — returns immediately
- */
-app.get('/prefetch', requireKey, (req, res) => {
+// Prefetch — no key needed
+app.get('/prefetch', rateLimit(10), (req, res) => {
   const { url } = req.query;
   if (!url) return res.status(400).json({ error: 'Missing url' });
   bypass(url, { skipCache: true }).catch(e => console.warn(`[prefetch] ${e.message}`));
   res.json({ success: true, queued: url });
 });
 
-/**
- * DELETE /cache?url=...
- * Clear a specific URL from cache
- */
-app.delete('/cache', requireMaster, async (req, res) => {
-  const { url } = req.query;
-  if (!url) return res.status(400).json({ error: 'Missing url' });
-  const plugin = registry.match(url);
-  if (!plugin) return res.status(400).json({ error: 'Unknown site' });
-  await cache.del(`${plugin.id}:${url}`);
-  res.json({ success: true, cleared: url });
-});
-
-// ══════════════════════════════════════════════════════════════════════════
-// PLUGIN MANAGEMENT
-// ══════════════════════════════════════════════════════════════════════════
-
-/**
- * GET /sites
- * List all loaded site plugins
- */
+// Sites list — no key needed
 app.get('/sites', (_, res) => {
   res.json(registry.list());
 });
 
-/**
- * POST /sites/:id/reload
- * Hot-reload a plugin without restarting server
- * Useful when you update a site parser
- */
-app.post('/sites/:id/reload', requireMaster, (req, res) => {
-  const result = registry.reload(req.params.id);
-  res.json(result);
-});
-
-// ══════════════════════════════════════════════════════════════════════════
-// OBSERVABILITY
-// ══════════════════════════════════════════════════════════════════════════
-
-/**
- * GET /stats
- * Full system stats — cache, circuits, registry, change alerts
- */
-app.get('/stats', requireKey, async (_, res) => {
+// Stats — no key needed
+app.get('/stats', async (_, res) => {
   const stats = await cache.getStats();
   res.json({
     cache    : stats,
@@ -163,27 +119,43 @@ app.get('/stats', requireKey, async (_, res) => {
   });
 });
 
+// Health — no key needed
+app.get('/health', (_, res) => res.json({
+  status: 'up',
+  sites : registry.list().length,
+  ts    : Date.now(),
+}));
+
 // ══════════════════════════════════════════════════════════════════════════
-// ADMIN
+// ADMIN ENDPOINTS — MASTER KEY REQUIRED
 // ══════════════════════════════════════════════════════════════════════════
 
-app.get('/admin/keys',          requireMaster, (_, res) => res.json({ keys: auth.list() }));
-app.post('/admin/keys',         requireMaster, (req, res) => {
+app.get('/admin/keys', requireMaster, (_, res) => res.json({ keys: auth.list() }));
+
+app.post('/admin/keys', requireMaster, (req, res) => {
   const { label = 'unnamed', rateLimit = 30 } = req.body;
   res.json({ success: true, key: auth.create(label, rateLimit) });
 });
-app.delete('/admin/keys/:key',  requireMaster, (req, res) => {
+
+app.delete('/admin/keys/:key', requireMaster, (req, res) => {
   res.json({ success: auth.remove(req.params.key) });
 });
 
-// ── Health ───────────────────────────────────────────────────────────────
-app.get('/health', (_, res) => res.json({
-  status  : 'up',
-  sites   : registry.list().length,
-  ts      : Date.now(),
-}));
+app.delete('/cache', requireMaster, async (req, res) => {
+  const { url } = req.query;
+  if (!url) return res.status(400).json({ error: 'Missing url' });
+  const plugin = registry.match(url);
+  if (!plugin) return res.status(400).json({ error: 'Unknown site' });
+  await cache.del(`${plugin.id}:${url}`);
+  res.json({ success: true, cleared: url });
+});
 
-// ── 404 ──────────────────────────────────────────────────────────────────
+app.post('/sites/:id/reload', requireMaster, (req, res) => {
+  const result = registry.reload(req.params.id);
+  res.json(result);
+});
+
+// 404
 app.use((req, res) => res.status(404).json({
   error    : 'Route not found',
   endpoints: ['/bypass', '/batch', '/prefetch', '/sites', '/stats', '/health'],
