@@ -1,0 +1,19 @@
+{
+  "name": "multisite-bypass-api",
+  "version": "7.0.0",
+  "description": "Multi-site bypass API — HubCloud, HubDrive, MultiCloudLinks, DriveHub, GoFile + plugin system",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js",
+    "test": "node test/test-all.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "cheerio": "^1.0.0",
+    "@upstash/redis": "^1.28.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
