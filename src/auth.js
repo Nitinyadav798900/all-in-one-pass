@@ -1,6 +1,6 @@
 'use strict';
 
-const MASTER_KEY = process.env.MASTER_API_KEY || 'changeme-master-key-set-in-env';
+const MASTER_KEY = process.env.MASTER_API_KEY || 'mnbvcxz9876543210';
 const keyStore   = new Map();
 
 // Default public key
