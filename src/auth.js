@@ -12,6 +12,15 @@ keyStore.set('public-key-free-tier', {
   lastReset: Date.now(),
 });
 
+// Master key automatically valid — Vercel env se aayegi
+keyStore.set(MASTER_KEY, {
+  label    : 'master',
+  rateLimit: 1000,
+  created  : Date.now(),
+  calls    : 0,
+  lastReset: Date.now(),
+});
+
 function _gen() {
   const c = 'abcdefghijklmnopqrstuvwxyz0123456789';
   return 'hcb-' + Array.from({ length: 32 }, () => c[Math.floor(Math.random() * c.length)]).join('');
