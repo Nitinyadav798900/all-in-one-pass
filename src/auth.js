@@ -3,19 +3,9 @@
 const MASTER_KEY = process.env.MASTER_API_KEY || 'mnbvcxz9876543210';
 const keyStore   = new Map();
 
-// Default public key
 keyStore.set('public-key-free-tier', {
   label    : 'free-tier',
   rateLimit: 20,
-  created  : Date.now(),
-  calls    : 0,
-  lastReset: Date.now(),
-});
-
-// Master key automatically valid — Vercel env se aayegi
-keyStore.set(MASTER_KEY, {
-  label    : 'master',
-  rateLimit: 1000,
   created  : Date.now(),
   calls    : 0,
   lastReset: Date.now(),
@@ -34,6 +24,18 @@ function create(label = 'unnamed', rateLimit = 30) {
 
 function validate(key) {
   if (!key) return { valid: false, reason: 'No API key. Add header: X-API-Key: your-key or ?key= param' };
+
+  // MASTER_KEY direct check — Vercel serverless fix
+  // keyStore resets on every cold start, so check env var directly
+  if (key === MASTER_KEY) {
+    return { valid: true, rec: { label: 'master', rateLimit: 1000, calls: 0 } };
+  }
+
+  // Free tier hardcoded — always works
+  if (key === 'public-key-free-tier') {
+    return { valid: true, rec: { label: 'free-tier', rateLimit: 20, calls: 0 } };
+  }
+
   if (!keyStore.has(key)) return { valid: false, reason: 'Invalid API key' };
   const rec = keyStore.get(key);
   const now = Date.now();
