@@ -47,21 +47,40 @@ class Streamtape extends BaseSite {
     const streamUrl = _extractStreamUrl(page.body, host);
 
     if (!streamUrl) {
-      // Log snippet for debugging
       const snip = page.body.match(/ideoooolink|norobotlink|captchalink|get_video/gi);
       console.error('[streamtape] keywords found:', snip);
       console.error('[streamtape] snippet:', page.body.slice(0, 3000));
       throw new Error('Streamtape: stream URL not found — page layout may have changed');
     }
 
-    const meta = _parseMeta(page.body, id);
+    const meta    = _parseMeta(page.body, id);
+    const servers = [];
 
-    return this._result(id, meta, [{
-      label : 'Streamtape Direct',
+    // Always add the get_video link
+    servers.push({
+      label : 'Streamtape Stream',
       url   : streamUrl,
       server: 'streamtape',
-      via   : 'direct',
-    }]);
+      via   : 'stream',
+    });
+
+    // Follow get_video redirect → tapecontent.net CDN direct link
+    try {
+      const cdnUrl = await _followToCdn(streamUrl, host, jar);
+      if (cdnUrl && cdnUrl !== streamUrl) {
+        servers.push({
+          label : 'Streamtape CDN Direct',
+          url   : cdnUrl,
+          server: 'streamtape-cdn',
+          via   : 'cdn',
+        });
+      }
+    } catch (e) {
+      console.warn('[streamtape] CDN follow failed:', e.message);
+      // Not fatal — stream link is still there
+    }
+
+    return this._result(id, meta, servers);
   }
 }
 
@@ -200,6 +219,51 @@ function _buildFinalUrl(raw, host) {
   }
 
   return url;
+}
+
+// ── Follow get_video → tapecontent.net CDN direct URL ────────────────────
+async function _followToCdn(streamUrl, host, jar) {
+  const https = require('https');
+  const http  = require('http');
+
+  return new Promise((resolve, reject) => {
+    const u       = new URL(streamUrl);
+    const isHttps = u.protocol === 'https:';
+    const lib     = isHttps ? https : http;
+
+    // We only want the Location header — don't download body
+    const req = lib.request({
+      hostname: u.hostname,
+      port    : u.port || (isHttps ? 443 : 80),
+      path    : u.pathname + u.search,
+      method  : 'GET',
+      timeout : 10000,
+      headers : {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36',
+        'Referer'   : `https://${host}/`,
+        'Cookie'    : jar.header(),
+      },
+    }, (res) => {
+      // Streamtape redirects to tapecontent.net
+      const loc = res.headers['location'];
+      res.destroy(); // Don't read body — we just need the redirect
+
+      if (loc) {
+        const cdnUrl = loc.startsWith('http') ? loc : new URL(loc, streamUrl).href;
+        console.log('[streamtape] CDN URL:', cdnUrl.slice(0, 80) + '...');
+        resolve(cdnUrl);
+      } else if (res.statusCode === 200) {
+        // No redirect — the URL itself is direct (some cases)
+        resolve(streamUrl);
+      } else {
+        reject(new Error(`CDN redirect not found (HTTP ${res.statusCode})`));
+      }
+    });
+
+    req.on('error',   reject);
+    req.on('timeout', () => { req.destroy(); reject(new Error('CDN follow timeout')); });
+    req.end();
+  });
 }
 
 function _parseMeta(html, fallbackId) {
