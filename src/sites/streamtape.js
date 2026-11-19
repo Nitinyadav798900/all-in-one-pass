@@ -151,31 +151,50 @@ function _evalConcatExpr(expr) {
 }
 
 // ── Build final URL from extracted path ───────────────────────────────────
-function _buildFinalUrl(path, host) {
-  let url;
+function _buildFinalUrl(raw, host) {
+  let path = raw;
 
-  if (path.startsWith('http://') || path.startsWith('https://')) {
+  // ── Step 1: Strip any corrupted/extra domain prefix ──────────────────
+  // e.g. 'stredamtape.to/get_video?...'  or  'streamtape.to/get_video?...'
+  // These appear when the JS concat picks up part of a domain string
+  path = path.replace(/^[a-z0-9.-]+\.[a-z]{2,6}(\/get_video)/i, '$1');
+
+  // ── Step 2: Normalize to absolute URL ────────────────────────────────
+  let url;
+  if (path.startsWith('https://') || path.startsWith('http://')) {
     url = path;
   } else if (path.startsWith('//')) {
+    // Protocol-relative — use https
     url = 'https:' + path;
+    // But ensure host is streamtape — not a corrupted subdomain
+    try {
+      const u = new URL(url);
+      if (!u.hostname.includes('streamtape')) {
+        // Host got corrupted — replace with correct host
+        url = `https://${host}${u.pathname}${u.search}`;
+      }
+    } catch (_) {}
   } else if (path.startsWith('/')) {
     url = `https://${host}${path}`;
   } else {
-    // No leading slash — could be 'streamtape.to/get_video...' accidentally
-    if (path.startsWith('streamtape')) {
-      url = 'https://' + path;
-    } else {
-      url = `https://${host}/${path}`;
-    }
+    // Bare path like 'get_video?...' — prefix host
+    url = `https://${host}/${path}`;
   }
 
-  // Clean dummy token suffixes Streamtape injects
+  // ── Step 3: Ensure get_video is in path, not nested ──────────────────
+  // Fix double-domain: https://streamtape.to/streamtape.to/get_video → fix
+  url = url.replace(
+    /(https:\/\/[^/]+)\/[a-z0-9.-]+\.[a-z]{2,6}(\/get_video)/i,
+    '$1$2'
+  );
+
+  // ── Step 4: Clean dummy token suffixes ───────────────────────────────
   url = url
     .replace(/token=([A-Za-z0-9_-]*?)(defg|xcdd|xcd|abcd)([A-Za-z0-9_-]*)/i, 'token=$1$3')
     .replace(/&&[^&]+/g, '')
     .replace(/&{2,}/g, '&');
 
-  // Add stream=1
+  // ── Step 5: Add stream=1 ─────────────────────────────────────────────
   if (!url.includes('stream=1')) {
     url += (url.includes('?') ? '&' : '?') + 'stream=1';
   }
