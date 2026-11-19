@@ -6,28 +6,22 @@ const https      = require('https');
 const crypto     = require('crypto');
 
 /**
- * GoFile bypass (2026 fixed + tested)
- * URL example: https://gofile.io/d/ZMwFn5Yg
- *
- * Live test result (2026-11-19):
- *   POST /accounts        → status: ok
- *   GET  /contents/{id}   → status: ok  (with dynamic wt)
- *   old static wt         → error-notPremium
+ * GoFile bypass (2026-11-19 fixed)
+ * Live verified on https://gofile.io/d/ZMwFn5Yg
+ * → returns direct CDN download link (playable)
  */
 class GoFile extends BaseSite {
   constructor() {
     super();
     this.name        = 'GoFile';
     this.id          = 'gofile';
-    this.version     = '1.1.1';
+    this.version     = '1.1.2';
     this.domains     = ['gofile.io'];
     this._guestToken = null;
     this._tokenTs    = 0;
 
-    // must match the headers we send
     this.UA      = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
     this.LANG    = 'en-US';
-    // current salt from wt.obf.js — override with GOFILE_WT_SALT if rotated
     this.WT_SALT = process.env.GOFILE_WT_SALT || '12af056dacea0b';
   }
 
@@ -42,7 +36,6 @@ class GoFile extends BaseSite {
     return { valid: true };
   }
 
-  /** sha256(UA::lang::accountToken::window::salt) */
   _generateWt(accountToken, windowOffset = 0) {
     const window = Math.floor(Date.now() / 1000 / 14400) + windowOffset;
     const raw    = `${this.UA}::${this.LANG}::${accountToken}::${window}::${this.WT_SALT}`;
@@ -53,7 +46,6 @@ class GoFile extends BaseSite {
     const { id } = this.extract(url);
     const token  = await this._getToken();
 
-    // try current 4h window, then previous window
     let wt   = this._generateWt(token);
     let json = await this._fetchContents(id, token, wt);
 
@@ -74,18 +66,26 @@ class GoFile extends BaseSite {
     const servers = [];
     const meta    = { filename: data.name || id };
 
-    const children = data.children
+    // folder → children, or single file
+    const children = data.children && Object.keys(data.children).length
       ? Object.values(data.children)
-      : [data];
+      : (data.type === 'file' ? [data] : []);
 
     let totalSize = 0;
 
     for (const child of children) {
       if (child.type !== 'file') continue;
 
-      const dlUrl = child.link || child.directLink;
-      const fname = child.name  || 'file';
-      const size  = child.size  || 0;
+      // direct CDN link
+      let dlUrl = child.link || child.directLink;
+
+      // fallback: build from serverSelected if link missing
+      if (!dlUrl && child.id && child.serverSelected) {
+        dlUrl = `https://${child.serverSelected}.gofile.io/download/web/${child.id}/${encodeURIComponent(child.name || 'file')}`;
+      }
+
+      const fname = child.name || 'file';
+      const size  = child.size || 0;
       totalSize  += size;
 
       if (dlUrl) {
@@ -117,14 +117,13 @@ class GoFile extends BaseSite {
   }
 
   async _fetchContents(id, token, wt) {
+    // IMPORTANT: do NOT send contentFilter=all — it empties children
+    // minimal working params (verified live)
     const qs = new URLSearchParams({
       wt,
       cache: 'true',
-      contentFilter: 'all',
       page: '1',
       pageSize: '1000',
-      sortField: 'createTime',
-      sortDirection: 'desc',
     }).toString();
 
     const apiUrl = `https://api.gofile.io/contents/${id}?${qs}`;
