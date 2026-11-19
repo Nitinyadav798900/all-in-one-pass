@@ -5,21 +5,12 @@ const cache         = require('./cache');
 const circuit       = require('./circuit');
 const { withRetry } = require('./retry');
 
-/**
- * Main bypass orchestrator — chain bypass support
- * HubDrive → HubCloud → actual download links
- */
 async function bypass(url, opts = {}) {
-  const { skipCache = false, attempts = 3, _chainDepth = 0, userIp = null } = opts;
+  const { skipCache = false, attempts = 3, userIp = null } = opts;
 
-  // Max chain depth — infinite loop se bachao
-  if (_chainDepth > 3) throw new Error('Chain bypass: max depth reached');
-
-  // Validate URL
   let parsed;
   try { parsed = new URL(url); } catch (_) { throw new Error(`Invalid URL: ${url}`); }
 
-  // Find plugin
   const plugin = registry.match(url);
   if (!plugin) {
     throw new Error(
@@ -30,7 +21,7 @@ async function bypass(url, opts = {}) {
 
   const cacheKey = `${plugin.id}:${url}`;
 
-  // ── Cache hit ────────────────────────────────────────────────────────
+  // Cache hit
   if (!skipCache) {
     const cached = await cache.get(cacheKey);
     if (cached) {
@@ -41,16 +32,30 @@ async function bypass(url, opts = {}) {
   }
   await cache.incrStat('cache_misses');
 
-  // ── Circuit check ────────────────────────────────────────────────────
+  // Circuit check
   if (circuit.isOpen(plugin.id)) {
     throw new Error(`${plugin.name} circuit OPEN — retry in 60s`);
   }
 
-  // ── Bypass with retry ────────────────────────────────────────────────
+  // Bypass with retry
   const result = await withRetry(
     async (attempt) => {
       if (attempt > 0) console.log(`[orchestrator] retry ${attempt} for ${plugin.id}`);
-      const r = await plugin.bypass(url, { userIp });
+
+      // Pass opts to plugin — each plugin decides what to use
+      // Safe: older plugins ignore extra opts
+      let r;
+      try {
+        r = await plugin.bypass(url, { userIp });
+      } catch(e) {
+        // If plugin doesn't accept opts, try without
+        if (e.message && e.message.includes('opts')) {
+          r = await plugin.bypass(url);
+        } else {
+          throw e;
+        }
+      }
+
       circuit.onSuccess(plugin.id);
       return r;
     },
@@ -59,8 +64,10 @@ async function bypass(url, opts = {}) {
 
   result.cached = false;
 
-  // ── Cache store ──────────────────────────────────────────────────────
-  await cache.set(cacheKey, result);
+  // Don't cache streamtape — tokens expire fast and are IP-bound
+  if (plugin.id !== 'streamtape') {
+    await cache.set(cacheKey, result);
+  }
   await cache.incrStat('total_bypassed');
 
   return result;
