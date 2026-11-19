@@ -32,13 +32,24 @@ class Streamtape extends BaseSite {
     return { valid: html.includes('streamtape') && html.length > 500 };
   }
 
-  async bypass(url) {
+  async bypass(url, opts = {}) {
     const { id, host } = this.extract(url);
-    const jar = new CookieJar();
+    const jar          = new CookieJar();
+    const userIp       = opts.userIp || null;
+
+    // Pass user's real IP so streamtape token binds to user's IP
+    // Without this, CDN URL is locked to our server IP → 403 for user
+    const extraHeaders = {};
+    if (userIp) {
+      extraHeaders['X-Forwarded-For'] = userIp;
+      extraHeaders['X-Real-IP']       = userIp;
+      console.log(`[streamtape] using user IP: ${userIp}`);
+    }
 
     const page = await rawGet(url, {
       referer: `https://${host}/`,
       jar,
+      headers: extraHeaders,
     });
 
     if (page.status === 404) throw new Error(`Streamtape: video not found (${id})`);
@@ -56,12 +67,10 @@ class Streamtape extends BaseSite {
     const meta    = _parseMeta(page.body, id);
     const servers = [];
 
-    // ── Follow get_video → tapecontent.net CDN (NOT IP-locked) ──────────
-    // get_video URL is IP-locked to whoever requests it.
-    // tapecontent.net CDN URL is NOT IP-locked — user can play it directly.
-    // So CDN link is PRIMARY. get_video is fallback only.
+    // ── Follow get_video → tapecontent.net CDN ──────────────────────────
+    // CRITICAL: pass userIp so CDN URL binds to user's IP, not server's
     try {
-      const cdnUrl = await _followToCdn(streamUrl, host, jar);
+      const cdnUrl = await _followToCdn(streamUrl, host, jar, userIp);
       if (cdnUrl && cdnUrl !== streamUrl) {
         // CDN link — playable by anyone, not IP-locked
         servers.push({
@@ -249,7 +258,7 @@ function _buildFinalUrl(raw, host) {
 // ── Follow get_video → tapecontent.net CDN URL ───────────────────────────
 // get_video redirects (302) to tapecontent.net — that URL is NOT IP-locked
 // Max 5 hops to handle any intermediate redirects
-async function _followToCdn(streamUrl, host, jar) {
+async function _followToCdn(streamUrl, host, jar, userIp = null) {
   const https = require('https');
   const http  = require('http');
 
@@ -263,19 +272,27 @@ async function _followToCdn(streamUrl, host, jar) {
       const isHttps = parsed.protocol === 'https:';
       const lib     = isHttps ? https : http;
 
+      const headers = {
+        'User-Agent'      : 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36',
+        'Referer'         : `https://${host}/`,
+        'Cookie'          : jar.header(),
+        'Accept'          : '*/*',
+        'Accept-Encoding' : 'identity',
+      };
+
+      // Pass user IP so CDN URL binds to user's IP
+      if (userIp) {
+        headers['X-Forwarded-For'] = userIp;
+        headers['X-Real-IP']       = userIp;
+      }
+
       const req = lib.request({
         hostname: parsed.hostname,
         port    : parsed.port || (isHttps ? 443 : 80),
         path    : parsed.pathname + parsed.search,
         method  : 'GET',
         timeout : 12000,
-        headers : {
-          'User-Agent'      : 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36',
-          'Referer'         : `https://${host}/`,
-          'Cookie'          : jar.header(),
-          'Accept'          : '*/*',
-          'Accept-Encoding' : 'identity', // no compression — we just need headers
-        },
+        headers,
       }, (res) => {
         const sc  = res.headers['set-cookie'];
         if (sc) jar.ingest(sc);
