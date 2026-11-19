@@ -10,7 +10,7 @@ const { withRetry } = require('./retry');
  * HubDrive → HubCloud → actual download links
  */
 async function bypass(url, opts = {}) {
-  const { skipCache = false, attempts = 3, _chainDepth = 0 } = opts;
+  const { skipCache = false, attempts = 3, _chainDepth = 0, userIp = null } = opts;
 
   // Max chain depth — infinite loop se bachao
   if (_chainDepth > 3) throw new Error('Chain bypass: max depth reached');
@@ -50,7 +50,7 @@ async function bypass(url, opts = {}) {
   const result = await withRetry(
     async (attempt) => {
       if (attempt > 0) console.log(`[orchestrator] retry ${attempt} for ${plugin.id}`);
-      const r = await plugin.bypass(url);
+      const r = await plugin.bypass(url, { userIp });
       circuit.onSuccess(plugin.id);
       return r;
     },
