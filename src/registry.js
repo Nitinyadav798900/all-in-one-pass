@@ -22,6 +22,7 @@ const SITE_FILES = [
   'multicloud.js',
   'drivehub.js',
   'gofile.js',
+  'streamtape.js' ,
   // ← add new site filenames here
 ];
 
