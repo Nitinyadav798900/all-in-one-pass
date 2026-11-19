@@ -1,22 +1,19 @@
 'use strict';
 
-const registry  = require('./registry');
-const cache     = require('./cache');
-const circuit   = require('./circuit');
+const registry      = require('./registry');
+const cache         = require('./cache');
+const circuit       = require('./circuit');
 const { withRetry } = require('./retry');
 
 /**
- * Main bypass orchestrator
- * Handles: cache → circuit check → retry → bypass → cache store
- *
- * @param {string} url
- * @param {object} opts
- * @param {boolean} opts.skipCache   - force fresh bypass
- * @param {number}  opts.attempts    - retry count (default 3)
- * @returns {Promise<BypassResult>}
+ * Main bypass orchestrator — chain bypass support
+ * HubDrive → HubCloud → actual download links
  */
 async function bypass(url, opts = {}) {
-  const { skipCache = false, attempts = 3 } = opts;
+  const { skipCache = false, attempts = 3, _chainDepth = 0 } = opts;
+
+  // Max chain depth — infinite loop se bachao
+  if (_chainDepth > 3) throw new Error('Chain bypass: max depth reached');
 
   // Validate URL
   let parsed;
@@ -46,7 +43,7 @@ async function bypass(url, opts = {}) {
 
   // ── Circuit check ────────────────────────────────────────────────────
   if (circuit.isOpen(plugin.id)) {
-    throw new Error(`${plugin.name} circuit is OPEN — temporarily unavailable. Try in 60s.`);
+    throw new Error(`${plugin.name} circuit OPEN — retry in 60s`);
   }
 
   // ── Bypass with retry ────────────────────────────────────────────────
@@ -57,12 +54,12 @@ async function bypass(url, opts = {}) {
       circuit.onSuccess(plugin.id);
       return r;
     },
-    { attempts, baseMs: 2000 }
+    { attempts }
   );
 
   result.cached = false;
 
-  // ── Store in cache ───────────────────────────────────────────────────
+  // ── Cache store ──────────────────────────────────────────────────────
   await cache.set(cacheKey, result);
   await cache.incrStat('total_bypassed');
 
