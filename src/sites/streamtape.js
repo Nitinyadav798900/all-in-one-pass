@@ -177,58 +177,72 @@ function _evalConcatExpr(expr) {
 
   // Must contain get_video to be valid
   if (!result.includes('get_video')) return null;
+
+  // Trim any leading garbage chars before the first /
+  // e.g. 'd/get_video' → '/get_video'
+  const slashIdx = result.indexOf('/get_video');
+  if (slashIdx > 0) result = result.slice(slashIdx);
+
   return result;
 }
 
 // ── Build final URL from extracted path ───────────────────────────────────
 function _buildFinalUrl(raw, host) {
-  let path = raw;
+  let path = String(raw).trim();
 
-  // ── Step 1: Strip any corrupted/extra domain prefix ──────────────────
-  // e.g. 'stredamtape.to/get_video?...'  or  'streamtape.to/get_video?...'
-  // These appear when the JS concat picks up part of a domain string
-  path = path.replace(/^[a-z0-9.-]+\.[a-z]{2,6}(\/get_video)/i, '$1');
+  // ── Step 1: Extract only the get_video part ───────────────────────────
+  // Whatever garbage is before /get_video — strip it all
+  // Handles: 'streamtape.to/get_video', 'dget_video', 'stredamtape.to/dget_video'
+  const getVideoMatch = path.match(/(\/get_video\?[^\s"'<>]+)/i);
+  if (getVideoMatch) {
+    path = getVideoMatch[1];
+  } else {
+    // Try to find get_video without leading slash
+    const bare = path.match(/get_video\?[^\s"'<>]+/i);
+    if (bare) path = '/' + bare[0];
+  }
 
-  // ── Step 2: Normalize to absolute URL ────────────────────────────────
+  // ── Step 2: Clean the path ────────────────────────────────────────────
+  // Remove any extra chars before 'get_video' (like the 'd' from innerHTML)
+  path = path.replace(/^\/+[^/]*?(get_video)/i, '/$1');
+
+  // ── Step 3: Build absolute URL ───────────────────────────────────────
   let url;
-  if (path.startsWith('https://') || path.startsWith('http://')) {
+  if (path.startsWith('http://') || path.startsWith('https://')) {
     url = path;
   } else if (path.startsWith('//')) {
-    // Protocol-relative — use https
     url = 'https:' + path;
-    // But ensure host is streamtape — not a corrupted subdomain
     try {
       const u = new URL(url);
       if (!u.hostname.includes('streamtape')) {
-        // Host got corrupted — replace with correct host
         url = `https://${host}${u.pathname}${u.search}`;
       }
     } catch (_) {}
-  } else if (path.startsWith('/')) {
-    url = `https://${host}${path}`;
   } else {
-    // Bare path like 'get_video?...' — prefix host
-    url = `https://${host}/${path}`;
+    // /get_video?... — just prepend host
+    url = `https://${host}${path.startsWith('/') ? path : '/' + path}`;
   }
 
-  // ── Step 3: Ensure get_video is in path, not nested ──────────────────
-  // Fix double-domain: https://streamtape.to/streamtape.to/get_video → fix
+  // ── Step 4: Final sanity — fix any remaining double domain ───────────
+  // https://streamtape.to/streamtape.to/get_video → https://streamtape.to/get_video
   url = url.replace(
-    /(https:\/\/[^/]+)\/[a-z0-9.-]+\.[a-z]{2,6}(\/get_video)/i,
+    /(https:\/\/[^/]+)\/.+?(\/get_video\?)/i,
     '$1$2'
   );
 
-  // ── Step 4: Clean dummy token suffixes ───────────────────────────────
+  // ── Step 5: Clean dummy token suffixes ───────────────────────────────
   url = url
     .replace(/token=([A-Za-z0-9_-]*?)(defg|xcdd|xcd|abcd)([A-Za-z0-9_-]*)/i, 'token=$1$3')
     .replace(/&&[^&]+/g, '')
-    .replace(/&{2,}/g, '&');
+    .replace(/&{2,}/g, '&')
+    .replace(/\s/g, '');
 
-  // ── Step 5: Add stream=1 ─────────────────────────────────────────────
+  // ── Step 6: Add stream=1 ─────────────────────────────────────────────
   if (!url.includes('stream=1')) {
     url += (url.includes('?') ? '&' : '?') + 'stream=1';
   }
 
+  console.log('[streamtape] built URL:', url);
   return url;
 }
 
