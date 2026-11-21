@@ -138,14 +138,12 @@ app.get('/debug-voe', rateLimit(10), async (req, res) => {
   try {
     const jar = new CookieJar();
 
-    // main page
     const pageRes = await rawGet(targetUrl, {
       headers: HEADERS, jar, followRedirects: true, timeout: 15000,
     });
 
-    // embed page
-    let embedBody   = '';
-    let embedErr    = null;
+    let embedBody = '';
+    let embedErr  = null;
     try {
       const embedRes = await rawGet(`https://voe.sx/e/${fileId}`, {
         headers: { ...HEADERS, Referer: targetUrl }, jar, timeout: 10000,
@@ -153,7 +151,6 @@ app.get('/debug-voe', rateLimit(10), async (req, res) => {
       embedBody = embedRes.body;
     } catch (e) { embedErr = e.message; }
 
-    // caseyseemavoid embed
     let altEmbedBody = '';
     let altEmbedErr  = null;
     try {
@@ -169,9 +166,9 @@ app.get('/debug-voe', rateLimit(10), async (req, res) => {
         url        : pageRes.url,
         length     : pageRes.body.length,
         snippet    : pageRes.body.slice(0, 6000),
-        m3u8_hits  : (pageRes.body.match(/m3u8/gi)  || []).length,
-        atob_hits  : (pageRes.body.match(/atob/gi)  || []).length,
-        wurl_hits  : (pageRes.body.match(/wurl/gi)  || []).length,
+        m3u8_hits  : (pageRes.body.match(/m3u8/gi)   || []).length,
+        atob_hits  : (pageRes.body.match(/atob/gi)   || []).length,
+        wurl_hits  : (pageRes.body.match(/wurl/gi)   || []).length,
         hls_hits   : (pageRes.body.match(/['"]hls['"]/gi) || []).length,
         source_hits: (pageRes.body.match(/var\s+source/gi) || []).length,
       },
@@ -187,7 +184,7 @@ app.get('/debug-voe', rateLimit(10), async (req, res) => {
       embed_casey: {
         error      : altEmbedErr,
         length     : altEmbedBody.length,
-        snippet    : altEmbedBody.slice(0, 6000),
+        snippet    : altEmbedBody.slice(0, 50000),  // increased
         m3u8_hits  : (altEmbedBody.match(/m3u8/gi)  || []).length,
         atob_hits  : (altEmbedBody.match(/atob/gi)  || []).length,
         wurl_hits  : (altEmbedBody.match(/wurl/gi)  || []).length,
