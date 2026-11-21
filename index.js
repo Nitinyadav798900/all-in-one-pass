@@ -18,7 +18,6 @@ app.use((_, res, next) => {
   next();
 });
 
-// Simple rate limit — IP based, no key needed
 const rateMap = new Map();
 function rateLimit(max = 60, windowMs = 60_000) {
   return (req, res, next) => {
@@ -32,7 +31,6 @@ function rateLimit(max = 60, windowMs = 60_000) {
   };
 }
 
-// Master key check — only for admin routes
 const requireMaster = (req, res, next) => {
   const k = req.headers['x-api-key'] || req.query.key;
   const masterKey = process.env.MASTER_API_KEY || 'changeme-master-key-set-in-env';
@@ -41,10 +39,9 @@ const requireMaster = (req, res, next) => {
 };
 
 // ══════════════════════════════════════════════════════════════════════════
-// PUBLIC ENDPOINTS — NO AUTH NEEDED
+// PUBLIC ENDPOINTS
 // ══════════════════════════════════════════════════════════════════════════
 
-// Main bypass endpoint — no key needed
 app.get('/bypass', rateLimit(60), async (req, res) => {
   const { url, nocache } = req.query;
   if (!url) {
@@ -71,7 +68,6 @@ app.get('/bypass', rateLimit(60), async (req, res) => {
   }
 });
 
-// Batch — no key needed
 app.post('/batch', rateLimit(10), async (req, res) => {
   const { urls, nocache = false } = req.body;
   if (!Array.isArray(urls) || !urls.length) return res.status(400).json({ error: '{ urls: ["..."] }' });
@@ -93,7 +89,6 @@ app.post('/batch', rateLimit(10), async (req, res) => {
   });
 });
 
-// Prefetch — no key needed
 app.get('/prefetch', rateLimit(10), (req, res) => {
   const { url } = req.query;
   if (!url) return res.status(400).json({ error: 'Missing url' });
@@ -101,12 +96,10 @@ app.get('/prefetch', rateLimit(10), (req, res) => {
   res.json({ success: true, queued: url });
 });
 
-// Sites list — no key needed
 app.get('/sites', (_, res) => {
   res.json(registry.list());
 });
 
-// Stats — no key needed
 app.get('/stats', async (_, res) => {
   const stats = await cache.getStats();
   res.json({
@@ -119,7 +112,6 @@ app.get('/stats', async (_, res) => {
   });
 });
 
-// Health — no key needed
 app.get('/health', (_, res) => res.json({
   status: 'up',
   sites : registry.list().length,
@@ -127,7 +119,87 @@ app.get('/health', (_, res) => res.json({
 }));
 
 // ══════════════════════════════════════════════════════════════════════════
-// ADMIN ENDPOINTS — MASTER KEY REQUIRED
+// DEBUG — REMOVE AFTER VOE FIX
+// ══════════════════════════════════════════════════════════════════════════
+
+app.get('/debug-voe', rateLimit(10), async (req, res) => {
+  const { rawGet, CookieJar } = require('./src/http');
+  const targetUrl = req.query.url || 'https://voe.sx/m3ev6b5kiypu';
+  const fileId    = (targetUrl.match(/\/([a-z0-9]{8,20})(?:[?/]|$)/) || [])[1] || 'm3ev6b5kiypu';
+
+  const HEADERS = {
+    'User-Agent'     : 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    'Accept'         : 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Referer'        : 'https://voe.sx/',
+    'Origin'         : 'https://voe.sx',
+  };
+
+  try {
+    const jar = new CookieJar();
+
+    // main page
+    const pageRes = await rawGet(targetUrl, {
+      headers: HEADERS, jar, followRedirects: true, timeout: 15000,
+    });
+
+    // embed page
+    let embedBody   = '';
+    let embedErr    = null;
+    try {
+      const embedRes = await rawGet(`https://voe.sx/e/${fileId}`, {
+        headers: { ...HEADERS, Referer: targetUrl }, jar, timeout: 10000,
+      });
+      embedBody = embedRes.body;
+    } catch (e) { embedErr = e.message; }
+
+    // caseyseemavoid embed
+    let altEmbedBody = '';
+    let altEmbedErr  = null;
+    try {
+      const altRes = await rawGet(`https://caseyseemavoid.com/e/${fileId}`, {
+        headers: { ...HEADERS, Referer: targetUrl }, jar, timeout: 10000,
+      });
+      altEmbedBody = altRes.body;
+    } catch (e) { altEmbedErr = e.message; }
+
+    res.json({
+      file_id: fileId,
+      page: {
+        url        : pageRes.url,
+        length     : pageRes.body.length,
+        snippet    : pageRes.body.slice(0, 6000),
+        m3u8_hits  : (pageRes.body.match(/m3u8/gi)  || []).length,
+        atob_hits  : (pageRes.body.match(/atob/gi)  || []).length,
+        wurl_hits  : (pageRes.body.match(/wurl/gi)  || []).length,
+        hls_hits   : (pageRes.body.match(/['"]hls['"]/gi) || []).length,
+        source_hits: (pageRes.body.match(/var\s+source/gi) || []).length,
+      },
+      embed_voe: {
+        error      : embedErr,
+        length     : embedBody.length,
+        snippet    : embedBody.slice(0, 6000),
+        m3u8_hits  : (embedBody.match(/m3u8/gi)  || []).length,
+        atob_hits  : (embedBody.match(/atob/gi)  || []).length,
+        wurl_hits  : (embedBody.match(/wurl/gi)  || []).length,
+        hls_hits   : (embedBody.match(/['"]hls['"]/gi) || []).length,
+      },
+      embed_casey: {
+        error      : altEmbedErr,
+        length     : altEmbedBody.length,
+        snippet    : altEmbedBody.slice(0, 6000),
+        m3u8_hits  : (altEmbedBody.match(/m3u8/gi)  || []).length,
+        atob_hits  : (altEmbedBody.match(/atob/gi)  || []).length,
+        wurl_hits  : (altEmbedBody.match(/wurl/gi)  || []).length,
+      },
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message, stack: e.stack });
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+// ADMIN ENDPOINTS
 // ══════════════════════════════════════════════════════════════════════════
 
 app.get('/admin/keys', requireMaster, (_, res) => res.json({ keys: auth.list() }));
