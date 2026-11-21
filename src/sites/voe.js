@@ -22,7 +22,6 @@ const BASE_HEADERS = {
   'Origin'         : 'https://voe.sx',
 };
 
-// never return these — placeholder/test URLs
 const BLOCKLIST = [
   'test-videos.co.uk',
   'sample-videos.com',
@@ -35,11 +34,9 @@ function isBlocked(url) {
 }
 
 function extractM3u8(html) {
-  // priority order — most specific to least
-
   // 1. atob-encoded source (voe's main obfuscation)
   const b64Patterns = [
-    /(?:hls2?|source|stream|hlsUrl|hlsSrc)\s*[:=]\s*atob\(\s*['"]([A-Za-z0-9+/=]+)['"]\s*\)/i,
+    /(?:hls2?|source|stream|hlsUrl|hlsSrc)\s*[:=]\s*atob\(\s*['"]([A-Za-z0-9+/=]+)['"]\s*\)/gi,
     /atob\(\s*['"]([A-Za-z0-9+/=]{30,})['"]\s*\)/g,
   ];
   for (const pat of b64Patterns) {
@@ -53,11 +50,11 @@ function extractM3u8(html) {
     }
   }
 
-  // 2. direct m3u8 URL in JS vars (hls, hlsUrl, source, wurl, etc.)
+  // 2. direct m3u8 in JS vars
   const hlsVarPatterns = [
-    /(?:hls2?|hlsUrl|hlsSrc|hlsSource|m3u8|stream)\s*[:=]\s*['"]([^'"]+\.m3u8[^'"]*)['"]/i,
-    /['"]([https?://[^'"]+\.m3u8[^'"]*)['"]/g,
-    /wurl\s*[:=]\s*['"]([^'"]+)['"]/i,
+    /(?:hls2?|hlsUrl|hlsSrc|hlsSource|m3u8|stream)\s*[:=]\s*['"]([^'"]+\.m3u8[^'"]*)['"]/gi,
+    /["'](https?:\/\/[^'"]+\.m3u8[^'"]*)['"]/g,
+    /wurl\s*[:=]\s*['"]([^'"]+)['"]/gi,
   ];
   for (const pat of hlsVarPatterns) {
     const matches = [...html.matchAll(pat)];
@@ -66,13 +63,15 @@ function extractM3u8(html) {
     }
   }
 
-  // 3. mp4 fallback — explicit var assignment only, NOT bare URL match
+  // 3. mp4 explicit var only — no loose URL match
   const mp4VarPatterns = [
-    /(?:mp4|source|src|videoUrl|directUrl)\s*[:=]\s*['"]([^'"]+\.mp4[^'"]*)['"]/i,
+    /(?:mp4|source|src|videoUrl|directUrl)\s*[:=]\s*['"]([^'"]+\.mp4[^'"]*)['"]/gi,
   ];
   for (const pat of mp4VarPatterns) {
-    const m = html.match(pat);
-    if (m?.[1] && !isBlocked(m[1])) return { url: m[1], type: 'mp4' };
+    const matches = [...html.matchAll(pat)];
+    for (const m of matches) {
+      if (m[1] && !isBlocked(m[1])) return { url: m[1], type: 'mp4' };
+    }
   }
 
   return null;
@@ -130,7 +129,7 @@ class VoeSite extends BaseSite {
         const embedRes = await rawGet(endpoint, {
           headers: {
             ...BASE_HEADERS,
-            Referer        : url,
+            Referer         : url,
             'Sec-Fetch-Dest': 'iframe',
             'Sec-Fetch-Mode': 'navigate',
             'Sec-Fetch-Site': 'cross-site',
@@ -144,24 +143,24 @@ class VoeSite extends BaseSite {
       } catch { continue; }
     }
 
-    // ── Step 5: /api/file/info ────────────────────────────────────────────
+    // ── Step 5: /api/file/info fallback ──────────────────────────────────
     try {
       const apiRes = await rawGet(`https://voe.sx/api/file/info/${fileId}`, {
         headers: BASE_HEADERS,
         jar,
         timeout: 8000,
       });
-      // rawGet likely returns body as string — try parse
+
       const data = typeof apiRes.body === 'string'
         ? JSON.parse(apiRes.body)
         : apiRes.body;
 
-      const hls = data?.file?.hls || data?.file?.stream;
-      const mp4 = data?.file?.mp4 || data?.file?.direct;
+      const hls = data?.file?.hls    || data?.file?.stream;
+      const mp4 = data?.file?.mp4    || data?.file?.direct;
 
       if (hls && !isBlocked(hls)) return this._buildResult(fileId, { url: hls, type: 'hls' });
       if (mp4 && !isBlocked(mp4)) return this._buildResult(fileId, { url: mp4, type: 'mp4' });
-    } catch { /* 404 or parse fail — continue */ }
+    } catch { /* 404 or parse fail */ }
 
     throw new Error('voe: stream URL not found — page structure may have changed or token expired');
   }
