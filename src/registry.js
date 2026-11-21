@@ -18,6 +18,7 @@ const SITE_FILES = [
   'drivehub.js',
   'gofile.js',
   'streamtape.js',
+  'voe.sx',
   // ← add new sites here
 ];
 
