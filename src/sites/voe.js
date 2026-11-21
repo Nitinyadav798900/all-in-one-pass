@@ -1,7 +1,7 @@
 'use strict';
 
 const axios    = require('axios');
-const BaseSite = require('./base'); // path check karo — same dir mein hoga
+const BaseSite = require('./base');
 
 const VOE_DOMAINS = [
   'voe.sx',
@@ -22,6 +22,13 @@ const HEADERS = {
   'Origin'         : 'https://voe.sx',
 };
 
+const EMBED_HEADERS = {
+  ...HEADERS,
+  'Sec-Fetch-Dest': 'iframe',
+  'Sec-Fetch-Mode': 'navigate',
+  'Sec-Fetch-Site': 'cross-site',
+};
+
 class VoeSite extends BaseSite {
   constructor() {
     super();
@@ -31,22 +38,17 @@ class VoeSite extends BaseSite {
     this.domains = VOE_DOMAINS;
   }
 
-  match(url) {
-    try {
-      const host = new URL(url).hostname.replace(/^www\./, '');
-      return VOE_DOMAINS.includes(host);
-    } catch {
-      return false;
-    }
-  }
+  // BaseSite.match() already handles domain check via this.domains
+  // override only needed if custom logic required — not needed here
 
-  async bypass(url) {
+  async bypass(url, opts = {}) {
     return this.extract(url);
   }
 
   async extract(url) {
     const session = axios.create({ headers: HEADERS });
 
+    // ── Step 1: Load page, follow redirects ──────────────────────────────
     const pageRes = await session.get(url, {
       maxRedirects : 5,
       timeout      : 15000,
@@ -56,14 +58,16 @@ class VoeSite extends BaseSite {
     const html     = pageRes.data;
     const finalUrl = pageRes.request?.res?.responseUrl || url;
 
-    const fileIdMatch =
-      finalUrl.match(/\/([a-z0-9]{8,20})(?:\?|$|\/)/) ||
-      url.match(/\/([a-z0-9]{8,20})(?:\?|$|\/)/);
-    const fileId = fileIdMatch?.[1] ?? null;
+    // ── Step 2: Extract file ID ───────────────────────────────────────────
+    const fileId = (
+      finalUrl.match(/\/([a-z0-9]{8,20})(?:[?/]|$)/) ||
+      url.match(/\/([a-z0-9]{8,20})(?:[?/]|$)/)
+    )?.[1] ?? null;
 
-    if (!fileId) throw new Error('Could not extract file ID from URL');
+    if (!fileId) throw new Error('voe: could not extract file ID from URL');
 
-    const baseUrl       = new URL(finalUrl).origin;
+    // ── Step 3: Try embed endpoints ───────────────────────────────────────
+    const baseUrl        = new URL(finalUrl).origin;
     const embedEndpoints = [
       `${baseUrl}/e/${fileId}`,
       `https://voe.sx/e/${fileId}`,
@@ -75,56 +79,63 @@ class VoeSite extends BaseSite {
 
     for (const endpoint of embedEndpoints) {
       try {
-        const embedRes  = await session.get(endpoint, {
+        const { data: embedHtml } = await session.get(endpoint, {
           timeout: 10000,
-          headers: { ...HEADERS, Referer: url },
+          headers: { ...EMBED_HEADERS, Referer: url },
         });
-        const embedHtml = embedRes.data;
 
-        const hls = embedHtml.match(/["'](https?:\/\/[^"'<>\s]+\.m3u8[^"'<>\s]*)['"]/);
-        if (hls) { m3u8Url = hls[1]; break; }
+        m3u8Url = embedHtml.match(/["'](https?:\/\/[^"'<>\s]+\.m3u8[^"'<>\s]*)['"]/)?.[1] ?? null;
+        if (m3u8Url) break;
 
-        const mp4 = embedHtml.match(/["'](https?:\/\/[^"'<>\s]+\.mp4[^"'<>\s]*)['"]/);
-        if (mp4) { mp4Url = mp4[1]; break; }
+        mp4Url = embedHtml.match(/["'](https?:\/\/[^"'<>\s]+\.mp4[^"'<>\s]*)['"]/)?.[1] ?? null;
+        if (mp4Url) break;
+
+        // voe sometimes base64-encodes the HLS url in a JS var
+        const b64 = embedHtml.match(/(?:hls|source|stream)\s*[:=]\s*atob\(['"]([A-Za-z0-9+/=]+)['"]\)/)?.[1];
+        if (b64) {
+          const decoded = Buffer.from(b64, 'base64').toString('utf8');
+          if (decoded.includes('.m3u8'))      { m3u8Url = decoded; break; }
+          if (decoded.includes('.mp4'))       { mp4Url  = decoded; break; }
+        }
       } catch { continue; }
     }
 
+    // ── Step 4: Try undocumented API ─────────────────────────────────────
     if (!m3u8Url && !mp4Url) {
       try {
-        const apiRes = await session.get(
+        const { data: api } = await session.get(
           `https://voe.sx/api/file/info/${fileId}`,
-          { timeout: 8000, headers: HEADERS }
+          { timeout: 8000 }
         );
-        if (apiRes.data?.file) {
-          m3u8Url = apiRes.data.file.hls    || apiRes.data.file.stream || null;
-          mp4Url  = apiRes.data.file.mp4    || apiRes.data.file.direct || null;
-        }
-      } catch { /* endpoint may not exist */ }
+        m3u8Url = api?.file?.hls    || api?.file?.stream || null;
+        mp4Url  = api?.file?.mp4    || api?.file?.direct || null;
+      } catch { /* endpoint may 404 */ }
     }
 
+    // ── Step 5: Fallback — scrape page source vars ────────────────────────
     if (!m3u8Url && !mp4Url) {
-      const srcMatch = html.match(/var\s+source\s*=\s*['"]([^'"]+)['"]/);
-      if (srcMatch && !srcMatch[1].includes('test-videos.co.uk')) {
-        const src = srcMatch[1];
+      const src = html.match(/var\s+source\s*=\s*['"]([^'"]+)['"]/)?.[1];
+      if (src && !src.includes('test-videos.co.uk')) {
         if (src.includes('.m3u8'))      m3u8Url = src;
         else if (src.includes('.mp4')) mp4Url  = src;
       }
-      const wurlMatch = html.match(/wurl\s*[:=]\s*['"]([^'"]+)['"]/);
-      if (wurlMatch) m3u8Url = wurlMatch[1];
+
+      const wurl = html.match(/wurl\s*[:=]\s*['"]([^'"]+)['"]/)?.[1];
+      if (wurl) m3u8Url = wurl;
     }
 
     if (!m3u8Url && !mp4Url)
-      throw new Error('Stream URL not found — voe.sx uses dynamic token generation, URL may be expired or geo-blocked');
+      throw new Error('voe: stream URL not found — token may be expired or geo-blocked');
 
-    return {
-      success : true,
-      url     : m3u8Url || mp4Url,
-      hls     : m3u8Url || null,
-      mp4     : mp4Url  || null,
-      file_id : fileId,
-      headers : { Referer: 'https://voe.sx/', Origin: 'https://voe.sx' },
-      servers : [{ url: m3u8Url || mp4Url, type: m3u8Url ? 'hls' : 'mp4' }],
-    };
+    // ── Build result via BaseSite._result() ───────────────────────────────
+    const streamUrl = m3u8Url || mp4Url;
+    const type      = m3u8Url ? 'hls' : 'mp4';
+
+    return this._result(
+      fileId,
+      { title: `VOE/${fileId}`, type },
+      [{ url: streamUrl, type, headers: { Referer: 'https://voe.sx/', Origin: 'https://voe.sx' } }],
+    );
   }
 }
 
