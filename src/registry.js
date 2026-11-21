@@ -3,14 +3,6 @@
 const crypto = require('crypto');
 const path   = require('path');
 
-/**
- * SiteRegistry — central plugin manager
- *
- * HOW TO ADD A NEW SITE:
- *   1. Create src/sites/yoursite.js  (extend BaseSite)
- *   2. Add filename to SITE_FILES below
- *   3. Done. Auto-loads on startup.
- */
 const SITE_FILES = [
   'hubcloud.js',
   'hubdrive.js',
@@ -19,7 +11,6 @@ const SITE_FILES = [
   'gofile.js',
   'streamtape.js',
   'voe.js',
-  // ← add new sites here
 ];
 
 class SiteRegistry {
@@ -36,7 +27,6 @@ class SiteRegistry {
       try {
         const plugin = require(path.join(dir, file));
 
-        // Validate plugin has required methods
         if (typeof plugin.match   !== 'function') { console.error(`[registry] ${file}: missing match() method`);   continue; }
         if (typeof plugin.extract !== 'function') { console.error(`[registry] ${file}: missing extract() method`); continue; }
         if (typeof plugin.bypass  !== 'function') { console.error(`[registry] ${file}: missing bypass() method`);  continue; }
@@ -46,16 +36,17 @@ class SiteRegistry {
         console.log(`[registry] ✓ loaded: ${plugin.id} (${plugin.name} v${plugin.version}) — ${plugin.domains.join(', ')}`);
       } catch (e) {
         console.error(`[registry] ✗ failed to load ${file}: ${e.message}`);
+        console.error(`[registry] stack: ${e.stack}`); // ← full stack trace
       }
     }
     this._loaded = true;
-    console.log(`[registry] ${this._plugins.size}/${SITE_FILES.length} sites loaded`);
+
+    // ── DEBUG — remove after fix ─────────────────────────────────────────
+    console.log('[registry] loaded plugins  :', [...this._plugins.keys()]);
+    console.log('[registry] supported domains:', this.supportedDomains());
+    // ────────────────────────────────────────────────────────────────────
   }
 
-  /**
-   * Find the right plugin for a URL
-   * Returns null if no plugin matches — never throws
-   */
   match(url) {
     if (!this._loaded) this.load();
     try {
@@ -68,9 +59,6 @@ class SiteRegistry {
     return null;
   }
 
-  /**
-   * Run bypass using the correct plugin
-   */
   async bypass(url) {
     const plugin = this.match(url);
     if (!plugin) {
@@ -90,9 +78,6 @@ class SiteRegistry {
     }
   }
 
-  /**
-   * Hot-reload a single plugin without restarting server
-   */
   reload(id) {
     const plugin = this._plugins.get(id);
     if (!plugin) return { success: false, error: `Plugin '${id}' not found` };
