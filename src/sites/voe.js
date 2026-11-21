@@ -1,7 +1,7 @@
 'use strict';
 
-const axios    = require('axios');
-const BaseSite = require('./base');
+const BaseSite              = require('../site-base');
+const { rawGet, CookieJar } = require('../http');
 
 const VOE_DOMAINS = [
   'voe.sx',
@@ -14,19 +14,12 @@ const VOE_DOMAINS = [
   'voeun.com',
 ];
 
-const HEADERS = {
+const BASE_HEADERS = {
   'User-Agent'     : 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
   'Accept'         : '*/*',
   'Accept-Language': 'en-US,en;q=0.9',
   'Referer'        : 'https://voe.sx/',
   'Origin'         : 'https://voe.sx',
-};
-
-const EMBED_HEADERS = {
-  ...HEADERS,
-  'Sec-Fetch-Dest': 'iframe',
-  'Sec-Fetch-Mode': 'navigate',
-  'Sec-Fetch-Site': 'cross-site',
 };
 
 class VoeSite extends BaseSite {
@@ -38,25 +31,23 @@ class VoeSite extends BaseSite {
     this.domains = VOE_DOMAINS;
   }
 
-  // BaseSite.match() already handles domain check via this.domains
-  // override only needed if custom logic required — not needed here
-
   async bypass(url, opts = {}) {
     return this.extract(url);
   }
 
   async extract(url) {
-    const session = axios.create({ headers: HEADERS });
+    const jar = new CookieJar();
 
-    // ── Step 1: Load page, follow redirects ──────────────────────────────
-    const pageRes = await session.get(url, {
-      maxRedirects : 5,
+    // ── Step 1: Load page ────────────────────────────────────────────────
+    const pageRes = await rawGet(url, {
+      headers      : BASE_HEADERS,
+      jar,
+      followRedirects: true,
       timeout      : 15000,
-      validateStatus: s => s < 400,
     });
 
-    const html     = pageRes.data;
-    const finalUrl = pageRes.request?.res?.responseUrl || url;
+    const html     = pageRes.body;
+    const finalUrl = pageRes.url || url;
 
     // ── Step 2: Extract file ID ───────────────────────────────────────────
     const fileId = (
@@ -79,40 +70,32 @@ class VoeSite extends BaseSite {
 
     for (const endpoint of embedEndpoints) {
       try {
-        const { data: embedHtml } = await session.get(endpoint, {
+        const embedRes  = await rawGet(endpoint, {
+          headers: { ...BASE_HEADERS, Referer: url },
+          jar,
           timeout: 10000,
-          headers: { ...EMBED_HEADERS, Referer: url },
         });
+        const embedHtml = embedRes.body;
 
+        // direct HLS
         m3u8Url = embedHtml.match(/["'](https?:\/\/[^"'<>\s]+\.m3u8[^"'<>\s]*)['"]/)?.[1] ?? null;
         if (m3u8Url) break;
 
+        // direct mp4
         mp4Url = embedHtml.match(/["'](https?:\/\/[^"'<>\s]+\.mp4[^"'<>\s]*)['"]/)?.[1] ?? null;
         if (mp4Url) break;
 
-        // voe sometimes base64-encodes the HLS url in a JS var
+        // atob-encoded HLS (voe common obfuscation)
         const b64 = embedHtml.match(/(?:hls|source|stream)\s*[:=]\s*atob\(['"]([A-Za-z0-9+/=]+)['"]\)/)?.[1];
         if (b64) {
           const decoded = Buffer.from(b64, 'base64').toString('utf8');
-          if (decoded.includes('.m3u8'))      { m3u8Url = decoded; break; }
-          if (decoded.includes('.mp4'))       { mp4Url  = decoded; break; }
+          if (decoded.includes('.m3u8')) { m3u8Url = decoded; break; }
+          if (decoded.includes('.mp4'))  { mp4Url  = decoded; break; }
         }
       } catch { continue; }
     }
 
-    // ── Step 4: Try undocumented API ─────────────────────────────────────
-    if (!m3u8Url && !mp4Url) {
-      try {
-        const { data: api } = await session.get(
-          `https://voe.sx/api/file/info/${fileId}`,
-          { timeout: 8000 }
-        );
-        m3u8Url = api?.file?.hls    || api?.file?.stream || null;
-        mp4Url  = api?.file?.mp4    || api?.file?.direct || null;
-      } catch { /* endpoint may 404 */ }
-    }
-
-    // ── Step 5: Fallback — scrape page source vars ────────────────────────
+    // ── Step 4: Scrape page source vars ──────────────────────────────────
     if (!m3u8Url && !mp4Url) {
       const src = html.match(/var\s+source\s*=\s*['"]([^'"]+)['"]/)?.[1];
       if (src && !src.includes('test-videos.co.uk')) {
@@ -127,7 +110,7 @@ class VoeSite extends BaseSite {
     if (!m3u8Url && !mp4Url)
       throw new Error('voe: stream URL not found — token may be expired or geo-blocked');
 
-    // ── Build result via BaseSite._result() ───────────────────────────────
+    // ── Result ────────────────────────────────────────────────────────────
     const streamUrl = m3u8Url || mp4Url;
     const type      = m3u8Url ? 'hls' : 'mp4';
 
