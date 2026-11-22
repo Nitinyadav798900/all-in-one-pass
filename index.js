@@ -54,6 +54,7 @@ app.get('/bypass', rateLimit(60), async (req, res) => {
         '/bypass?url=https://hubdrive.blog/file/3002211248',
         '/bypass?url=https://new3.multicloudlinks.com/view/f533404ca2',
         '/bypass?url=https://new2.drivehub.dad/file/4346143',
+        '/bypass?url=https://voe.sx/m3ev6b5kiypu',
       ],
     });
   }
@@ -114,176 +115,92 @@ app.get('/health', (_, res) => res.json({
 }));
 
 // ══════════════════════════════════════════════════════════════════════════
-// DEBUG ENDPOINTS — REMOVE AFTER VOE FIX
+// DEBUG — REMOVE AFTER VOE FIX
 // ══════════════════════════════════════════════════════════════════════════
 
-app.get('/debug-voe', rateLimit(10), async (req, res) => {
+app.get('/debug-voe-download', rateLimit(10), async (req, res) => {
   const { rawGet, CookieJar } = require('./src/http');
-  const targetUrl = req.query.url || 'https://voe.sx/m3ev6b5kiypu';
-  const fileId    = (targetUrl.match(/\/([a-z0-9]{8,20})(?:[?/]|$)/) || [])[1] || 'm3ev6b5kiypu';
+  const fileId = req.query.id || 'jtsfgm0mzxit';
 
   const HEADERS = {
-    'User-Agent'     : 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-    'Accept'         : 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-    'Accept-Language': 'en-US,en;q=0.9',
-    'Referer'        : 'https://voe.sx/',
-    'Origin'         : 'https://voe.sx',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    'Accept'    : 'text/html,application/xhtml+xml,*/*;q=0.8',
+    'Referer'   : 'https://voe.sx/',
   };
 
+  const results = {};
+
+  // test 1: follow redirects
   try {
-    const jar = new CookieJar();
-
-    const pageRes = await rawGet(targetUrl, {
-      headers: HEADERS, jar, followRedirects: true, timeout: 15000,
+    const r = await rawGet(`https://caseyseemavoid.com/${fileId}/download`, {
+      headers        : HEADERS,
+      jar            : new CookieJar(),
+      followRedirects: true,
+      timeout        : 15000,
     });
+    results.download_follow = {
+      all_keys         : Object.keys(r),
+      url              : r.url,
+      finalUrl         : r.finalUrl,
+      redirectUrl      : r.redirectUrl,
+      responseUrl      : r.responseUrl,
+      status           : r.status || r.statusCode,
+      body_length      : (r.body || '').length,
+      body_snippet     : (r.body || '').slice(0, 500),
+      request_url      : r.request?.url,
+      request_res_url  : r.request?.res?.responseUrl,
+      location_header  : r.headers?.location || r.headers?.Location,
+      all_headers      : r.headers,
+    };
+  } catch(e) { results.download_follow = { error: e.message, stack: e.stack?.slice(0, 500) }; }
 
-    let embedBody = '';
-    let embedErr  = null;
-    try {
-      const embedRes = await rawGet(`https://voe.sx/e/${fileId}`, {
-        headers: { ...HEADERS, Referer: targetUrl }, jar, timeout: 10000,
-      });
-      embedBody = embedRes.body;
-    } catch (e) { embedErr = e.message; }
-
-    let altEmbedBody = '';
-    let altEmbedErr  = null;
-    try {
-      const altRes = await rawGet(`https://caseyseemavoid.com/e/${fileId}`, {
-        headers: { ...HEADERS, Referer: targetUrl }, jar, timeout: 10000,
-      });
-      altEmbedBody = altRes.body;
-    } catch (e) { altEmbedErr = e.message; }
-
-    res.json({
-      file_id: fileId,
-      page: {
-        url        : pageRes.url,
-        length     : pageRes.body.length,
-        snippet    : pageRes.body.slice(0, 6000),
-        m3u8_hits  : (pageRes.body.match(/m3u8/gi)        || []).length,
-        atob_hits  : (pageRes.body.match(/atob/gi)        || []).length,
-        wurl_hits  : (pageRes.body.match(/wurl/gi)        || []).length,
-        hls_hits   : (pageRes.body.match(/['"]hls['"]/gi) || []).length,
-        source_hits: (pageRes.body.match(/var\s+source/gi)|| []).length,
-      },
-      embed_voe: {
-        error      : embedErr,
-        length     : embedBody.length,
-        snippet    : embedBody.slice(0, 6000),
-        m3u8_hits  : (embedBody.match(/m3u8/gi)        || []).length,
-        atob_hits  : (embedBody.match(/atob/gi)        || []).length,
-        wurl_hits  : (embedBody.match(/wurl/gi)        || []).length,
-        hls_hits   : (embedBody.match(/['"]hls['"]/gi) || []).length,
-      },
-      embed_casey: {
-        error      : altEmbedErr,
-        length     : altEmbedBody.length,
-        snippet    : altEmbedBody.slice(0, 50000),
-        m3u8_hits  : (altEmbedBody.match(/m3u8/gi)  || []).length,
-        atob_hits  : (altEmbedBody.match(/atob/gi)  || []).length,
-        wurl_hits  : (altEmbedBody.match(/wurl/gi)  || []).length,
-      },
-    });
-  } catch (e) {
-    res.status(500).json({ error: e.message, stack: e.stack });
-  }
-});
-
-app.get('/debug-voe2', rateLimit(10), async (req, res) => {
-  const { rawGet, CookieJar } = require('./src/http');
-  const fileId = req.query.id || 'm3ev6b5kiypu';
-
-  const HEADERS = {
-    'User-Agent'     : 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-    'Accept'         : '*/*',
-    'Accept-Language': 'en-US,en;q=0.9',
-    'Referer'        : `https://caseyseemavoid.com/e/${fileId}`,
-    'Origin'         : 'https://caseyseemavoid.com',
-  };
-
+  // test 2: no redirect — raw 302
   try {
-    const jar = new CookieJar();
-
-    // 1. fetch loader.js — decode logic is here
-    let loaderJs  = '';
-    let loaderErr = null;
-    try {
-      const loaderRes = await rawGet('https://caseyseemavoid.com/js/loader.a40897e.js', {
-        headers: HEADERS, jar, timeout: 10000,
-      });
-      loaderJs = loaderRes.body;
-    } catch (e) { loaderErr = e.message; }
-
-    // 2. fetch casey embed page
-    const pageRes = await rawGet(`https://caseyseemavoid.com/e/${fileId}`, {
-      headers: { ...HEADERS, Referer: 'https://voe.sx/' }, jar, timeout: 15000,
+    const r = await rawGet(`https://caseyseemavoid.com/${fileId}/download`, {
+      headers        : HEADERS,
+      jar            : new CookieJar(),
+      followRedirects: false,
+      timeout        : 10000,
     });
-    const html = pageRes.body;
+    results.download_no_redirect = {
+      all_keys        : Object.keys(r),
+      status          : r.status || r.statusCode,
+      location_header : r.headers?.location || r.headers?.Location,
+      all_headers     : r.headers,
+      body_snippet    : (r.body || '').slice(0, 300),
+    };
+  } catch(e) { results.download_no_redirect = { error: e.message }; }
 
-    // 3. extract application/json script tag — encoded payload lives here
-    const jsonMatch    = html.match(/<script type="application\/json">\s*(\[[\s\S]*?\])\s*<\/script>/);
-    const encodedPayload = jsonMatch ? jsonMatch[1] : null;
+  // test 3: http module exports
+  try {
+    const httpModule = require('./src/http');
+    results.http_module_exports = Object.keys(httpModule);
+  } catch(e) { results.http_module_exports = { error: e.message }; }
 
-    // 4. decode attempt — split on known separators
-    let decodedAttempt = null;
-    if (encodedPayload) {
-      try {
-        const arr = JSON.parse(encodedPayload);
-        const str = arr[0];
+  // test 4: voe page — check if /download link in HTML
+  try {
+    const r = await rawGet(`https://caseyseemavoid.com/${fileId}`, {
+      headers        : { ...HEADERS, Referer: 'https://voe.sx/' },
+      jar            : new CookieJar(),
+      followRedirects: true,
+      timeout        : 15000,
+    });
+    const html = r.body || '';
+    const downloadLinks = [...html.matchAll(/href="([^"]*\/download[^"]*)"/g)].map(m => m[1]);
+    const cdnLinks      = [...html.matchAll(/https?:\/\/[^\s"'<>]*cloudwindow[^\s"'<>]*/g)].map(m => m[0]);
+    const mp4Links      = [...html.matchAll(/https?:\/\/[^\s"'<>]+\.mp4[^\s"'<>]*/g)].map(m => m[0]);
+    results.casey_page = {
+      status        : r.status || r.statusCode,
+      url           : r.url,
+      body_length   : html.length,
+      download_links: downloadLinks.slice(0, 10),
+      cdn_links     : cdnLinks.slice(0, 5),
+      mp4_links     : mp4Links.slice(0, 5),
+      body_snippet  : html.slice(0, 1000),
+    };
+  } catch(e) { results.casey_page = { error: e.message }; }
 
-        const tokens = str
-          .split(/\^\^|!!|~@|#&|@\$|\*~|%\?/g)
-          .filter(t => t.length > 0);
-
-        // each token is likely a 2-char encoded char — map A-Z0-9 → char
-        // try simple base conversion: each token = row+col in charset
-        const charset = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=';
-        const separators = ['^^', '!!', '~@', '#&', '@$', '*~', '%?'];
-
-        // attempt: each token is 2-4 chars, try treating as index pairs
-        const decoded = tokens.map(t => {
-          // try: first char = row (A=0,B=1..Z=25,a=26..z=51,0=52..9=61)
-          // second char = col offset
-          const c1 = t.charCodeAt(0);
-          const c2 = t.charCodeAt(1);
-          // simple XOR attempt
-          return String.fromCharCode(c1 ^ c2);
-        }).join('');
-
-        res.json({
-          loader_js_length : loaderJs.length,
-          loader_js_err    : loaderErr,
-          loader_js_snippet: loaderJs.slice(0, 5000),
-          payload_length   : encodedPayload.length,
-          payload_snippet  : encodedPayload.slice(0, 300),
-          total_tokens     : tokens.length,
-          first_30_tokens  : tokens.slice(0, 30),
-          xor_decoded_peek : decoded.slice(0, 200),
-          script_srcs      : [...html.matchAll(/<script[^>]+src="([^"]+)"/g)].map(m => m[1]),
-        });
-      } catch (e) {
-        res.json({
-          loader_js_length : loaderJs.length,
-          loader_js_err    : loaderErr,
-          loader_js_snippet: loaderJs.slice(0, 5000),
-          parse_error      : e.message,
-          script_srcs      : [...html.matchAll(/<script[^>]+src="([^"]+)"/g)].map(m => m[1]),
-        });
-      }
-    } else {
-      res.json({
-        loader_js_length : loaderJs.length,
-        loader_js_err    : loaderErr,
-        loader_js_snippet: loaderJs.slice(0, 5000),
-        encoded_payload  : null,
-        note             : 'application/json script tag not found in casey embed',
-        script_srcs      : [...html.matchAll(/<script[^>]+src="([^"]+)"/g)].map(m => m[1]),
-      });
-    }
-  } catch (e) {
-    res.status(500).json({ error: e.message, stack: e.stack });
-  }
+  res.json(results);
 });
 
 // ══════════════════════════════════════════════════════════════════════════
