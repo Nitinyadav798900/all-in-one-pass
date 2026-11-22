@@ -57,7 +57,6 @@ app.get('/bypass', rateLimit(60), async (req, res) => {
       ],
     });
   }
-
   try {
     const result = await bypass(url, { skipCache: nocache === '1' });
     res.json(result);
@@ -72,11 +71,9 @@ app.post('/batch', rateLimit(10), async (req, res) => {
   const { urls, nocache = false } = req.body;
   if (!Array.isArray(urls) || !urls.length) return res.status(400).json({ error: '{ urls: ["..."] }' });
   if (urls.length > 10) return res.status(400).json({ error: 'Max 10 URLs per batch' });
-
   const results = await Promise.allSettled(
     urls.map(url => bypass(url, { skipCache: nocache }))
   );
-
   res.json({
     success: true,
     total  : urls.length,
@@ -96,9 +93,7 @@ app.get('/prefetch', rateLimit(10), (req, res) => {
   res.json({ success: true, queued: url });
 });
 
-app.get('/sites', (_, res) => {
-  res.json(registry.list());
-});
+app.get('/sites', (_, res) => res.json(registry.list()));
 
 app.get('/stats', async (_, res) => {
   const stats = await cache.getStats();
@@ -119,7 +114,7 @@ app.get('/health', (_, res) => res.json({
 }));
 
 // ══════════════════════════════════════════════════════════════════════════
-// DEBUG — REMOVE AFTER VOE FIX
+// DEBUG ENDPOINTS — REMOVE AFTER VOE FIX
 // ══════════════════════════════════════════════════════════════════════════
 
 app.get('/debug-voe', rateLimit(10), async (req, res) => {
@@ -166,30 +161,126 @@ app.get('/debug-voe', rateLimit(10), async (req, res) => {
         url        : pageRes.url,
         length     : pageRes.body.length,
         snippet    : pageRes.body.slice(0, 6000),
-        m3u8_hits  : (pageRes.body.match(/m3u8/gi)   || []).length,
-        atob_hits  : (pageRes.body.match(/atob/gi)   || []).length,
-        wurl_hits  : (pageRes.body.match(/wurl/gi)   || []).length,
+        m3u8_hits  : (pageRes.body.match(/m3u8/gi)        || []).length,
+        atob_hits  : (pageRes.body.match(/atob/gi)        || []).length,
+        wurl_hits  : (pageRes.body.match(/wurl/gi)        || []).length,
         hls_hits   : (pageRes.body.match(/['"]hls['"]/gi) || []).length,
-        source_hits: (pageRes.body.match(/var\s+source/gi) || []).length,
+        source_hits: (pageRes.body.match(/var\s+source/gi)|| []).length,
       },
       embed_voe: {
         error      : embedErr,
         length     : embedBody.length,
         snippet    : embedBody.slice(0, 6000),
-        m3u8_hits  : (embedBody.match(/m3u8/gi)  || []).length,
-        atob_hits  : (embedBody.match(/atob/gi)  || []).length,
-        wurl_hits  : (embedBody.match(/wurl/gi)  || []).length,
+        m3u8_hits  : (embedBody.match(/m3u8/gi)        || []).length,
+        atob_hits  : (embedBody.match(/atob/gi)        || []).length,
+        wurl_hits  : (embedBody.match(/wurl/gi)        || []).length,
         hls_hits   : (embedBody.match(/['"]hls['"]/gi) || []).length,
       },
       embed_casey: {
         error      : altEmbedErr,
         length     : altEmbedBody.length,
-        snippet    : altEmbedBody.slice(0, 50000),  // increased
+        snippet    : altEmbedBody.slice(0, 50000),
         m3u8_hits  : (altEmbedBody.match(/m3u8/gi)  || []).length,
         atob_hits  : (altEmbedBody.match(/atob/gi)  || []).length,
         wurl_hits  : (altEmbedBody.match(/wurl/gi)  || []).length,
       },
     });
+  } catch (e) {
+    res.status(500).json({ error: e.message, stack: e.stack });
+  }
+});
+
+app.get('/debug-voe2', rateLimit(10), async (req, res) => {
+  const { rawGet, CookieJar } = require('./src/http');
+  const fileId = req.query.id || 'm3ev6b5kiypu';
+
+  const HEADERS = {
+    'User-Agent'     : 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    'Accept'         : '*/*',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Referer'        : `https://caseyseemavoid.com/e/${fileId}`,
+    'Origin'         : 'https://caseyseemavoid.com',
+  };
+
+  try {
+    const jar = new CookieJar();
+
+    // 1. fetch loader.js — decode logic is here
+    let loaderJs  = '';
+    let loaderErr = null;
+    try {
+      const loaderRes = await rawGet('https://caseyseemavoid.com/js/loader.a40897e.js', {
+        headers: HEADERS, jar, timeout: 10000,
+      });
+      loaderJs = loaderRes.body;
+    } catch (e) { loaderErr = e.message; }
+
+    // 2. fetch casey embed page
+    const pageRes = await rawGet(`https://caseyseemavoid.com/e/${fileId}`, {
+      headers: { ...HEADERS, Referer: 'https://voe.sx/' }, jar, timeout: 15000,
+    });
+    const html = pageRes.body;
+
+    // 3. extract application/json script tag — encoded payload lives here
+    const jsonMatch    = html.match(/<script type="application\/json">\s*(\[[\s\S]*?\])\s*<\/script>/);
+    const encodedPayload = jsonMatch ? jsonMatch[1] : null;
+
+    // 4. decode attempt — split on known separators
+    let decodedAttempt = null;
+    if (encodedPayload) {
+      try {
+        const arr = JSON.parse(encodedPayload);
+        const str = arr[0];
+
+        const tokens = str
+          .split(/\^\^|!!|~@|#&|@\$|\*~|%\?/g)
+          .filter(t => t.length > 0);
+
+        // each token is likely a 2-char encoded char — map A-Z0-9 → char
+        // try simple base conversion: each token = row+col in charset
+        const charset = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=';
+        const separators = ['^^', '!!', '~@', '#&', '@$', '*~', '%?'];
+
+        // attempt: each token is 2-4 chars, try treating as index pairs
+        const decoded = tokens.map(t => {
+          // try: first char = row (A=0,B=1..Z=25,a=26..z=51,0=52..9=61)
+          // second char = col offset
+          const c1 = t.charCodeAt(0);
+          const c2 = t.charCodeAt(1);
+          // simple XOR attempt
+          return String.fromCharCode(c1 ^ c2);
+        }).join('');
+
+        res.json({
+          loader_js_length : loaderJs.length,
+          loader_js_err    : loaderErr,
+          loader_js_snippet: loaderJs.slice(0, 5000),
+          payload_length   : encodedPayload.length,
+          payload_snippet  : encodedPayload.slice(0, 300),
+          total_tokens     : tokens.length,
+          first_30_tokens  : tokens.slice(0, 30),
+          xor_decoded_peek : decoded.slice(0, 200),
+          script_srcs      : [...html.matchAll(/<script[^>]+src="([^"]+)"/g)].map(m => m[1]),
+        });
+      } catch (e) {
+        res.json({
+          loader_js_length : loaderJs.length,
+          loader_js_err    : loaderErr,
+          loader_js_snippet: loaderJs.slice(0, 5000),
+          parse_error      : e.message,
+          script_srcs      : [...html.matchAll(/<script[^>]+src="([^"]+)"/g)].map(m => m[1]),
+        });
+      }
+    } else {
+      res.json({
+        loader_js_length : loaderJs.length,
+        loader_js_err    : loaderErr,
+        loader_js_snippet: loaderJs.slice(0, 5000),
+        encoded_payload  : null,
+        note             : 'application/json script tag not found in casey embed',
+        script_srcs      : [...html.matchAll(/<script[^>]+src="([^"]+)"/g)].map(m => m[1]),
+      });
+    }
   } catch (e) {
     res.status(500).json({ error: e.message, stack: e.stack });
   }
