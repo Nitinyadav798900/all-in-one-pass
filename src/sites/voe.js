@@ -1,7 +1,7 @@
 'use strict';
 
 const BaseSite              = require('../site-base');
-const { rawGet, CookieJar } = require('../http');
+const { rawGet, rawPost, CookieJar } = require('../http');
 
 const VOE_DOMAINS = [
   'voe.sx',
@@ -33,12 +33,35 @@ function isBlocked(u) {
   return BLOCKLIST.some(d => u.includes(d));
 }
 
+function extractCsrf(html) {
+  // meta tag
+  const meta = html.match(/<meta\s+name="csrf-token"\s+content="([^"]+)"/i);
+  if (meta) return meta[1];
+  // input field
+  const input = html.match(/<input[^>]+name="_token"[^>]+value="([^"]+)"/i);
+  if (input) return input[1];
+  return null;
+}
+
+function extractCdnUrl(text) {
+  // cloudwindow CDN URLs
+  const cdn = text.match(/https?:\/\/[^\s"'<>]*cloudwindow[^\s"'<>]+/);
+  if (cdn && !isBlocked(cdn[0])) return cdn[0];
+  // any mp4
+  const mp4 = text.match(/https?:\/\/[^\s"'<>]+\.mp4[^\s"'<>]*/);
+  if (mp4 && !isBlocked(mp4[0])) return mp4[0];
+  // any m3u8
+  const m3u = text.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/);
+  if (m3u && !isBlocked(m3u[0])) return { url: m3u[0], type: 'hls' };
+  return null;
+}
+
 class VoeSite extends BaseSite {
   constructor() {
     super();
     this.id      = 'voe';
     this.name    = 'VOE.sx';
-    this.version = '3.0.0';
+    this.version = '4.0.0';
     this.domains = VOE_DOMAINS;
   }
 
@@ -57,86 +80,126 @@ class VoeSite extends BaseSite {
 
     if (!fileId) throw new Error('voe: could not extract file ID from URL');
 
-    // ── Step 2: voe.sx → caseyseemavoid redirect ─────────────────────────
-    // voe.sx does JS redirect to caseyseemavoid.com
-    // caseyseemavoid.com/{fileId}/download redirects to real CDN mp4
+    // ── Step 2: load casey page — get session cookies + CSRF token ────────
+    const pageRes = await rawGet(`https://caseyseemavoid.com/${fileId}`, {
+      headers        : { ...BASE_HEADERS, Referer: 'https://voe.sx/' },
+      jar,
+      followRedirects: true,
+      timeout        : 15000,
+    });
 
-    const downloadEndpoints = [
-      `https://caseyseemavoid.com/${fileId}/download`,
-      `https://caseyseemavoid.com/file/${fileId}/download`,
-      `https://voe.sx/${fileId}/download`,
-    ];
+    const html  = pageRes.body || '';
+    const csrf  = extractCsrf(html);
 
-    let mp4Url  = null;
-    let m3u8Url = null;
-
-    for (const endpoint of downloadEndpoints) {
+    // ── Step 3: POST to download endpoint with CSRF ───────────────────────
+    if (csrf) {
       try {
-        const res = await rawGet(endpoint, {
-          headers        : { ...BASE_HEADERS, Referer: 'https://voe.sx/' },
-          jar,
-          followRedirects: true,
-          timeout        : 15000,
-        });
+        const postRes = await rawPost(
+          `https://caseyseemavoid.com/${fileId}/download`,
+          { _token: csrf },
+          {
+            headers: {
+              ...BASE_HEADERS,
+              'Referer'         : `https://caseyseemavoid.com/${fileId}`,
+              'Origin'          : 'https://caseyseemavoid.com',
+              'Accept'          : 'application/json, text/plain, */*',
+              'X-Requested-With': 'XMLHttpRequest',
+              'Content-Type'    : 'application/x-www-form-urlencoded',
+              'X-CSRF-TOKEN'    : csrf,
+            },
+            jar,
+            followRedirects: true,
+            timeout        : 15000,
+          }
+        );
 
-        const finalUrl = res.url || endpoint;
+        const postBody = postRes.body || '';
+        const finalUrl = postRes.finalUrl || '';
 
-        // redirect landed on actual CDN URL
-        if (
-          finalUrl !== endpoint &&
-          !isBlocked(finalUrl) &&
-          (finalUrl.includes('.mp4') || finalUrl.includes('.m3u8'))
-        ) {
-          if (finalUrl.includes('.m3u8')) m3u8Url = finalUrl;
-          else mp4Url = finalUrl;
-          break;
-        }
-
-        // also check response body for redirect or meta-refresh
-        const html = res.body || '';
-        if (html.length < 50000) {
-          // look for direct URL in small page
-          const urlMatch = html.match(/https?:\/\/[^\s"'<>]+\.(?:mp4|m3u8)[^\s"'<>]*/);
-          if (urlMatch && !isBlocked(urlMatch[0])) {
-            if (urlMatch[0].includes('.m3u8')) m3u8Url = urlMatch[0];
-            else mp4Url = urlMatch[0];
-            break;
+        // check redirect URL
+        if (finalUrl && finalUrl !== `https://caseyseemavoid.com/${fileId}/download`) {
+          if (!isBlocked(finalUrl) && (finalUrl.includes('.mp4') || finalUrl.includes('.m3u8'))) {
+            const type = finalUrl.includes('.m3u8') ? 'hls' : 'mp4';
+            return this._buildResult(fileId, { url: finalUrl, type });
           }
         }
-      } catch { continue; }
+
+        // check response body for CDN URL
+        const found = extractCdnUrl(postBody);
+        if (found) {
+          if (typeof found === 'string') return this._buildResult(fileId, { url: found, type: 'mp4' });
+          return this._buildResult(fileId, found);
+        }
+
+        // try parse JSON response
+        try {
+          const json = JSON.parse(postBody);
+          const cdnUrl = json.url || json.download_url || json.link || json.mp4 || json.stream;
+          if (cdnUrl && !isBlocked(cdnUrl)) {
+            const type = cdnUrl.includes('.m3u8') ? 'hls' : 'mp4';
+            return this._buildResult(fileId, { url: cdnUrl, type });
+          }
+        } catch { /* not JSON */ }
+
+      } catch (e) {
+        console.warn(`[voe] POST download failed: ${e.message}`);
+      }
     }
 
-    // ── Step 3: try /e/ embed page for HLS ───────────────────────────────
-    if (!mp4Url && !m3u8Url) {
-      try {
-        const embedRes = await rawGet(`https://caseyseemavoid.com/e/${fileId}`, {
-          headers: { ...BASE_HEADERS, Referer: 'https://voe.sx/' },
-          jar,
-          followRedirects: true,
-          timeout        : 15000,
-        });
+    // ── Step 4: GET download with session cookies (no redirect block) ─────
+    try {
+      const dlRes = await rawGet(`https://caseyseemavoid.com/${fileId}/download`, {
+        headers: {
+          ...BASE_HEADERS,
+          'Referer': `https://caseyseemavoid.com/${fileId}`,
+          'Accept' : 'application/json, */*',
+        },
+        jar,
+        followRedirects: true,
+        timeout        : 15000,
+      });
 
-        const html = embedRes.body || '';
+      const dlBody   = dlRes.body    || '';
+      const dlFinal  = dlRes.finalUrl || '';
 
-        // try to find direct stream link in page
-        const hlsMatch = html.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/);
-        if (hlsMatch && !isBlocked(hlsMatch[0])) m3u8Url = hlsMatch[0];
+      if (dlFinal && !isBlocked(dlFinal) && (dlFinal.includes('.mp4') || dlFinal.includes('.m3u8'))) {
+        const type = dlFinal.includes('.m3u8') ? 'hls' : 'mp4';
+        return this._buildResult(fileId, { url: dlFinal, type });
+      }
 
-        const mp4Match = html.match(/https?:\/\/[^\s"'<>]+\.mp4[^\s"'<>]*/);
-        if (!m3u8Url && mp4Match && !isBlocked(mp4Match[0])) mp4Url = mp4Match[0];
-      } catch { /* continue */ }
+      const found = extractCdnUrl(dlBody);
+      if (found) {
+        if (typeof found === 'string') return this._buildResult(fileId, { url: found, type: 'mp4' });
+        return this._buildResult(fileId, found);
+      }
+    } catch (e) {
+      console.warn(`[voe] GET download failed: ${e.message}`);
     }
 
-    if (!mp4Url && !m3u8Url)
-      throw new Error('voe: stream URL not found');
+    // ── Step 5: embed page HLS fallback ───────────────────────────────────
+    try {
+      const embedRes = await rawGet(`https://caseyseemavoid.com/e/${fileId}`, {
+        headers        : { ...BASE_HEADERS, Referer: `https://caseyseemavoid.com/${fileId}` },
+        jar,
+        followRedirects: true,
+        timeout        : 15000,
+      });
+      const embedHtml = embedRes.body || '';
+      const found     = extractCdnUrl(embedHtml);
+      if (found) {
+        if (typeof found === 'string') return this._buildResult(fileId, { url: found, type: 'mp4' });
+        return this._buildResult(fileId, found);
+      }
+    } catch { /* ignore */ }
 
-    const streamUrl = m3u8Url || mp4Url;
-    const type      = m3u8Url ? 'hls' : 'mp4';
+    throw new Error('voe: stream URL not found — site may require browser-side JS execution');
+  }
 
+  _buildResult(fileId, { url, type }) {
     return this._result(
       fileId,
       { title: `VOE/${fileId}`, type },
-      [{ url: streamUrl, type, headers: { Referer: 'https://voe.sx/', Origin: 'https://voe.sx' } }],
+      [{ url, type, headers: { Referer: 'https://voe.sx/', Origin: 'https://voe.sx' } }],
     );
   }
 }
