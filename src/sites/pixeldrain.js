@@ -8,12 +8,13 @@ class PixelDrain extends BaseSite {
     super();
     this.name    = 'PixelDrain';
     this.id      = 'pixeldrain';
-    this.version = '1.1.0';
+    this.version = '1.2.0';
     this.domains = [
       'pixeldrain.com',
       'pixeldrain.dev',
       'cdn.pixeldrain.eu.cc',
       'pixeldrain.eu.cc',
+      ...Array.from({ length: 30 }, (_, i) => `cdn${i + 1}.pixeldrain.eu.cc`),
     ];
   }
 
@@ -21,66 +22,113 @@ class PixelDrain extends BaseSite {
     const u    = new URL(url);
     const host = u.hostname;
 
-    // ── CDN direct link ───────────────────────────────────────────────
-    // https://cdn.pixeldrain.eu.cc/uhCDQYe6?download
-    // already a direct URL — just return it
-    if (host.startsWith('cdn.')) {
-      const fileId = u.pathname.replace('/', '') || 'unknown';
-      const type   = url.includes('.m3u8') ? 'hls'
-                   : url.includes('.mp4')  ? 'mp4' : 'direct';
+    // ── CDN direct link already ───────────────────────────────────────
+    if (host.includes('cdn') && host.includes('pixeldrain')) {
+      const fileId = u.pathname.replace(/^\/(?:api\/file\/)?/, '').split('/')[0] || 'unknown';
       return this._result(fileId, { title: fileId }, [
-        { url, type, headers: {} },
+        {
+          url    : url,
+          type   : 'direct',
+          label  : 'PixelDrain CDN',
+          headers: {
+            'Referer'   : `https://pixeldrain.com/u/${fileId}`,
+            'Origin'    : 'https://pixeldrain.com',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+          },
+        },
       ]);
     }
 
-    // ── /u/ or /l/ page ───────────────────────────────────────────────
-    // https://pixeldrain.dev/u/hNpELhd9
-    const fileId = u.pathname.match(/\/(?:u|l|d|f)\/([A-Za-z0-9]+)/)?.[1]
+    // ── Extract file ID ───────────────────────────────────────────────
+    const fileId = u.pathname.match(/\/(?:u|l|d|f|api\/file)\/([A-Za-z0-9]+)/)?.[1]
                 || u.pathname.split('/').filter(Boolean).pop();
     if (!fileId) throw new Error('pixeldrain: could not extract file ID');
 
-    // ── API — try both domains ────────────────────────────────────────
-    const apiHosts = ['pixeldrain.com', 'pixeldrain.dev', 'pixeldrain.eu.cc'];
-    let   meta     = {};
+    // ── Load viewer page — extract window.viewer_data ─────────────────
+    const jar     = new CookieJar();
+    const pageRes = await rawGet(`https://${host}/u/${fileId}`, {
+      jar,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Accept'    : 'text/html,application/xhtml+xml,*/*',
+      },
+      followRedirects: true,
+      timeout        : 15000,
+    });
 
-    for (const apiHost of apiHosts) {
+    const html   = pageRes.body || '';
+    let   meta   = {};
+    let   apiRes = {};
+
+    // extract viewer_data JSON from page
+    try {
+      const vd = html.match(/window\.viewer_data\s*=\s*(\{[\s\S]+?\});[\s\n]/)?.[1];
+      if (vd) {
+        const parsed = JSON.parse(vd);
+        apiRes = parsed?.api_response || {};
+        meta   = {
+          title    : apiRes.name    || fileId,
+          size     : apiRes.size    || null,
+          mime     : apiRes.mime_type || null,
+          views    : apiRes.views   || null,
+          downloads: apiRes.downloads || null,
+          can_download: apiRes.can_download !== false,
+        };
+      }
+    } catch { /* fall through */ }
+
+    // fallback: hit API directly
+    if (!meta.title) {
       try {
-        const apiRes = await rawGet(`https://${apiHost}/api/file/${fileId}/info`, {
-          timeout: 10000,
+        const infoRes = await rawGet(`https://${host}/api/file/${fileId}/info`, {
+          jar, timeout: 8000,
         });
-        meta = JSON.parse(apiRes.body);
-        if (meta.id) break;
-      } catch { continue; }
+        apiRes = JSON.parse(infoRes.body);
+        meta   = {
+          title    : apiRes.name     || fileId,
+          size     : apiRes.size     || null,
+          mime     : apiRes.mime_type || null,
+          can_download: apiRes.can_download !== false,
+        };
+      } catch { meta = { title: fileId }; }
     }
 
-    // ── Build download URLs ────────────────────────────────────────────
-    const servers = [];
+    // ── Build servers ─────────────────────────────────────────────────
+    // correct Referer = key to bypass hotlink detection
+    const referer = `https://${host}/u/${fileId}`;
 
-    // primary: api/file/{id} direct stream
-    servers.push({
-      url  : `https://${host}/api/file/${fileId}`,
-      type : 'direct',
-      label: 'PixelDrain Direct',
-    });
-
-    // cdn subdomain if available
-    servers.push({
-      url  : `https://cdn.pixeldrain.eu.cc/${fileId}?download`,
-      type : 'direct',
-      label: 'PixelDrain CDN',
-    });
-
-    return this._result(
-      fileId,
+    const servers = [
       {
-        title    : meta.name || fileId,
-        size     : meta.size || null,
-        mime     : meta.mime_type || null,
-        views    : meta.views || null,
+        url  : `https://${host}/api/file/${fileId}`,
+        type : _mimeToType(meta.mime),
+        label: 'PixelDrain Direct',
+        headers: {
+          'Referer'   : referer,
+          'Origin'    : `https://${host}`,
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        },
       },
-      servers,
-    );
+      {
+        url  : `https://${host}/api/file/${fileId}?download`,
+        type : 'direct',
+        label: 'PixelDrain Download',
+        headers: {
+          'Referer'   : referer,
+          'Origin'    : `https://${host}`,
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        },
+      },
+    ];
+
+    return this._result(fileId, meta, servers);
   }
+}
+
+function _mimeToType(mime) {
+  if (!mime) return 'direct';
+  if (mime.includes('video')) return 'mp4';
+  if (mime.includes('audio')) return 'mp4';
+  return 'direct';
 }
 
 module.exports = new PixelDrain();
