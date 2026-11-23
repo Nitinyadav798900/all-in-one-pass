@@ -51,10 +51,9 @@ app.get('/bypass', rateLimit(60), async (req, res) => {
       examples: [
         '/bypass?url=https://hubcloud.pw/drive/ABC123',
         '/bypass?url=https://gofile.io/d/pVawQzDG',
-        '/bypass?url=https://hubdrive.blog/file/3002211248',
-        '/bypass?url=https://new3.multicloudlinks.com/view/f533404ca2',
-        '/bypass?url=https://new2.drivehub.dad/file/4346143',
+        '/bypass?url=https://pixeldrain.dev/u/hNpELhd9',
         '/bypass?url=https://voe.sx/m3ev6b5kiypu',
+        '/bypass?url=https://doodstream.com/e/abc123',
       ],
     });
   }
@@ -115,93 +114,263 @@ app.get('/health', (_, res) => res.json({
 }));
 
 // ══════════════════════════════════════════════════════════════════════════
-// DEBUG — REMOVE AFTER VOE FIX
+// INFO, FORMATS, PLAYLIST, PROXY
 // ══════════════════════════════════════════════════════════════════════════
 
-app.get('/debug-voe-download', rateLimit(10), async (req, res) => {
-  const { rawGet, CookieJar } = require('./src/http');
-  const fileId = req.query.id || 'jtsfgm0mzxit';
-
-  const HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-    'Accept'    : 'text/html,application/xhtml+xml,*/*;q=0.8',
-    'Referer'   : 'https://voe.sx/',
-  };
-
-  const results = {};
-
-  // test 1: follow redirects
+app.get('/info', rateLimit(60), async (req, res) => {
+  const { url } = req.query;
+  if (!url) return res.status(400).json({ success: false, error: 'Missing ?url=' });
   try {
-    const r = await rawGet(`https://caseyseemavoid.com/${fileId}/download`, {
-      headers        : HEADERS,
-      jar            : new CookieJar(),
-      followRedirects: true,
-      timeout        : 15000,
+    const plugin = registry.match(url);
+    if (!plugin) return res.status(400).json({
+      success: false,
+      error  : `Unsupported site: ${new URL(url).hostname}`,
     });
-    results.download_follow = {
-      all_keys         : Object.keys(r),
-      url              : r.url,
-      finalUrl         : r.finalUrl,
-      redirectUrl      : r.redirectUrl,
-      responseUrl      : r.responseUrl,
-      status           : r.status || r.statusCode,
-      body_length      : (r.body || '').length,
-      body_snippet     : (r.body || '').slice(0, 500),
-      request_url      : r.request?.url,
-      request_res_url  : r.request?.res?.responseUrl,
-      location_header  : r.headers?.location || r.headers?.Location,
-      all_headers      : r.headers,
-    };
-  } catch(e) { results.download_follow = { error: e.message, stack: e.stack?.slice(0, 500) }; }
-
-  // test 2: no redirect — raw 302
-  try {
-    const r = await rawGet(`https://caseyseemavoid.com/${fileId}/download`, {
-      headers        : HEADERS,
-      jar            : new CookieJar(),
-      followRedirects: false,
-      timeout        : 10000,
+    const result = await bypass(url, { skipCache: true });
+    const server = result.servers?.[0];
+    let size = result.metadata?.size || null;
+    let mime = null;
+    if (server?.url) {
+      try {
+        const { rawGet, CookieJar } = require('./src/http');
+        const headRes = await rawGet(server.url, {
+          jar    : new CookieJar(),
+          headers: { ...(server.headers || {}), Range: 'bytes=0-0' },
+          timeout: 8000,
+        });
+        size = headRes.headers?.['content-range']
+          ? parseInt(headRes.headers['content-range'].split('/')[1]) || size
+          : parseInt(headRes.headers?.['content-length']) || size;
+        mime = headRes.headers?.['content-type'] || null;
+      } catch {}
+    }
+    res.json({
+      success : true,
+      site    : plugin.id,
+      file_id : result.file_id,
+      metadata: {
+        title      : result.metadata?.title || result.file_id,
+        size_bytes : size,
+        size_human : size ? _humanSize(size) : null,
+        type       : server?.type || null,
+        mime,
+        encrypted  : result.metadata?.encrypted || false,
+      },
+      url,
     });
-    results.download_no_redirect = {
-      all_keys        : Object.keys(r),
-      status          : r.status || r.statusCode,
-      location_header : r.headers?.location || r.headers?.Location,
-      all_headers     : r.headers,
-      body_snippet    : (r.body || '').slice(0, 300),
-    };
-  } catch(e) { results.download_no_redirect = { error: e.message }; }
-
-  // test 3: http module exports
-  try {
-    const httpModule = require('./src/http');
-    results.http_module_exports = Object.keys(httpModule);
-  } catch(e) { results.http_module_exports = { error: e.message }; }
-
-  // test 4: voe page — check if /download link in HTML
-  try {
-    const r = await rawGet(`https://caseyseemavoid.com/${fileId}`, {
-      headers        : { ...HEADERS, Referer: 'https://voe.sx/' },
-      jar            : new CookieJar(),
-      followRedirects: true,
-      timeout        : 15000,
-    });
-    const html = r.body || '';
-    const downloadLinks = [...html.matchAll(/href="([^"]*\/download[^"]*)"/g)].map(m => m[1]);
-    const cdnLinks      = [...html.matchAll(/https?:\/\/[^\s"'<>]*cloudwindow[^\s"'<>]*/g)].map(m => m[0]);
-    const mp4Links      = [...html.matchAll(/https?:\/\/[^\s"'<>]+\.mp4[^\s"'<>]*/g)].map(m => m[0]);
-    results.casey_page = {
-      status        : r.status || r.statusCode,
-      url           : r.url,
-      body_length   : html.length,
-      download_links: downloadLinks.slice(0, 10),
-      cdn_links     : cdnLinks.slice(0, 5),
-      mp4_links     : mp4Links.slice(0, 5),
-      body_snippet  : html.slice(0, 1000),
-    };
-  } catch(e) { results.casey_page = { error: e.message }; }
-
-  res.json(results);
+  } catch (e) {
+    res.status(502).json({ success: false, error: e.message, url });
+  }
 });
+
+app.get('/formats', rateLimit(30), async (req, res) => {
+  const { url } = req.query;
+  if (!url) return res.status(400).json({ success: false, error: 'Missing ?url=' });
+  try {
+    const result  = await bypass(url, { skipCache: true });
+    const servers = result.servers || [];
+    const hlsSrv  = servers.find(s => s.type === 'hls');
+    if (hlsSrv) {
+      try {
+        const { rawGet } = require('./src/http');
+        const m3u8Res   = await rawGet(hlsSrv.url, { headers: hlsSrv.headers || {}, timeout: 10000 });
+        const formats   = _parseHlsManifest(m3u8Res.body || '', hlsSrv.url);
+        return res.json({
+          success: true,
+          site   : result.site,
+          file_id: result.file_id,
+          formats: formats.length ? formats : [{ quality: 'auto', url: hlsSrv.url, type: 'hls', bandwidth: null }],
+        });
+      } catch {}
+    }
+    res.json({
+      success: true,
+      site   : result.site,
+      file_id: result.file_id,
+      formats: servers.map((s, i) => ({
+        quality  : s.label || `stream_${i}`,
+        url      : s.url,
+        type     : s.type,
+        bandwidth: null,
+      })),
+    });
+  } catch (e) {
+    res.status(502).json({ success: false, error: e.message, url });
+  }
+});
+
+app.get('/playlist', rateLimit(30), async (req, res) => {
+  const { url, quality } = req.query;
+  if (!url) return res.status(400).json({ success: false, error: 'Missing ?url=' });
+  try {
+    const result  = await bypass(url, { skipCache: false });
+    const hlsSrv  = (result.servers || []).find(s => s.type === 'hls');
+    if (!hlsSrv) return res.status(400).json({
+      success: false,
+      error  : 'No HLS stream found for this URL',
+      servers: result.servers,
+    });
+    const { rawGet } = require('./src/http');
+    const m3u8Res   = await rawGet(hlsSrv.url, { headers: hlsSrv.headers || {}, timeout: 10000 });
+    const manifest  = m3u8Res.body || '';
+    const formats   = _parseHlsManifest(manifest, hlsSrv.url);
+    if (!formats.length) {
+      return res.json({
+        success : true,
+        type    : 'media_playlist',
+        url     : hlsSrv.url,
+        headers : hlsSrv.headers,
+        segments: (manifest.match(/#EXTINF/g) || []).length,
+      });
+    }
+    let selected = formats[0];
+    if (quality) {
+      const q = quality.toLowerCase().replace('p', '');
+      selected = formats.find(f => String(f.height) === q || f.quality === quality) || formats[0];
+    }
+    res.json({
+      success : true,
+      type    : 'master_playlist',
+      selected,
+      all     : formats,
+      headers : hlsSrv.headers,
+    });
+  } catch (e) {
+    res.status(502).json({ success: false, error: e.message, url });
+  }
+});
+
+// ── PROXY — stream proxy with full session warming ─────────────────────
+app.get('/proxy', rateLimit(20), async (req, res) => {
+  const { url, referer, cookie } = req.query;
+  if (!url) return res.status(400).json({ error: 'Missing ?url=' });
+
+  try {
+    const { rawGet, CookieJar } = require('./src/http');
+    const jar = new CookieJar();
+
+    const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+
+    const headers = {
+      'User-Agent'     : UA,
+      'Accept'         : '*/*',
+      'Accept-Language': 'en-US,en;q=0.9',
+      'Accept-Encoding': 'identity',
+      'Referer'        : referer || new URL(url).origin + '/',
+      'Origin'         : new URL(url).origin,
+    };
+    if (cookie) headers['Cookie'] = cookie;
+
+    // ── PixelDrain: warm session before proxying ──────────────────────
+    const isPd = url.includes('pixeldrain');
+    if (isPd) {
+      const fileId = url.match(/\/file\/([A-Za-z0-9]+)/)?.[1];
+      if (fileId) {
+        const pdHost = new URL(url).hostname;
+        // step 1: load viewer page — sets session cookies
+        await rawGet(`https://${pdHost}/u/${fileId}`, {
+          jar,
+          headers        : { 'User-Agent': UA, 'Accept': 'text/html,*/*' },
+          followRedirects: true,
+          timeout        : 10000,
+        }).catch(() => {});
+        // step 2: hit info API — warms CDN session
+        await rawGet(`https://${pdHost}/api/file/${fileId}/info`, {
+          jar,
+          headers: { 'User-Agent': UA, 'Referer': `https://${pdHost}/u/${fileId}` },
+          timeout: 5000,
+        }).catch(() => {});
+        // step 3: set correct headers for final request
+        headers['Referer'] = `https://${pdHost}/u/${fileId}`;
+        headers['Origin']  = `https://${pdHost}`;
+        try { headers['Cookie'] = jar.header(); } catch {}
+      }
+    }
+
+    // ── Fetch upstream ────────────────────────────────────────────────
+    const upstream = await rawGet(url, {
+      jar,
+      headers,
+      followRedirects: true,
+      timeout        : 30000,
+    });
+
+    if (!upstream || !upstream.body) {
+      return res.status(502).json({ error: 'Empty response from upstream' });
+    }
+
+    const ct = upstream.headers?.['content-type'] || 'application/octet-stream';
+    const cl = upstream.headers?.['content-length'];
+    const cr = upstream.headers?.['content-range'];
+    const ac = upstream.headers?.['accept-ranges'];
+
+    res.setHeader('Content-Type', ct);
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Headers', '*');
+    res.setHeader('Cache-Control', 'no-cache');
+    if (cl) res.setHeader('Content-Length', cl);
+    if (cr) res.setHeader('Content-Range', cr);
+    if (ac) res.setHeader('Accept-Ranges', ac);
+
+    // ── m3u8 — rewrite segment URLs through proxy ─────────────────────
+    if (ct.includes('mpegurl') || url.includes('.m3u8')) {
+      const baseUrl   = url.substring(0, url.lastIndexOf('/') + 1);
+      const rewritten = (upstream.body || '')
+        .split('\n')
+        .map(line => {
+          line = line.trim();
+          if (!line || line.startsWith('#')) return line;
+          const absUrl = line.startsWith('http') ? line : baseUrl + line;
+          return `/proxy?url=${encodeURIComponent(absUrl)}&referer=${encodeURIComponent(headers['Referer'])}`;
+        })
+        .join('\n');
+      return res.send(rewritten);
+    }
+
+    res.send(upstream.body);
+  } catch (e) {
+    console.error(`[/proxy] ${e.message}`);
+    res.status(502).json({ error: e.message });
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+// HELPERS
+// ══════════════════════════════════════════════════════════════════════════
+
+function _humanSize(bytes) {
+  if (!bytes) return null;
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let i = 0;
+  while (bytes >= 1024 && i < units.length - 1) { bytes /= 1024; i++; }
+  return `${bytes.toFixed(2)} ${units[i]}`;
+}
+
+function _parseHlsManifest(manifest, baseUrl) {
+  const formats = [];
+  const base    = baseUrl.substring(0, baseUrl.lastIndexOf('/') + 1);
+  const lines   = manifest.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (line.startsWith('#EXT-X-STREAM-INF')) {
+      const bw     = line.match(/BANDWIDTH=(\d+)/)?.[1];
+      const res    = line.match(/RESOLUTION=(\d+x\d+)/)?.[1];
+      const height = res ? parseInt(res.split('x')[1]) : null;
+      const next   = lines[i + 1]?.trim();
+      if (next && !next.startsWith('#')) {
+        formats.push({
+          quality  : height ? `${height}p` : 'auto',
+          height,
+          bandwidth: bw ? parseInt(bw) : null,
+          url      : next.startsWith('http') ? next : base + next,
+          type     : 'hls',
+        });
+        i++;
+      }
+    }
+  }
+  return formats.sort((a, b) => (b.height || 0) - (a.height || 0));
+}
 
 // ══════════════════════════════════════════════════════════════════════════
 // ADMIN ENDPOINTS
@@ -235,7 +404,7 @@ app.post('/sites/:id/reload', requireMaster, (req, res) => {
 // 404
 app.use((req, res) => res.status(404).json({
   error    : 'Route not found',
-  endpoints: ['/bypass', '/batch', '/prefetch', '/sites', '/stats', '/health'],
+  endpoints: ['/bypass', '/batch', '/prefetch', '/sites', '/stats', '/health', '/info', '/formats', '/playlist', '/proxy'],
 }));
 
 app.listen(PORT, () => {
