@@ -11,6 +11,7 @@ const SITE_FILES = [
   'gofile.js',
   'streamtape.js',
   'voe.js',
+  'pixeldrain.js',
 ];
 
 class SiteRegistry {
