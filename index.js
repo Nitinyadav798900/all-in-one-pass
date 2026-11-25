@@ -53,7 +53,7 @@ app.get('/bypass', rateLimit(60), async (req, res) => {
         '/bypass?url=https://gofile.io/d/pVawQzDG',
         '/bypass?url=https://pixeldrain.dev/u/hNpELhd9',
         '/bypass?url=https://voe.sx/m3ev6b5kiypu',
-        '/bypass?url=https://doodstream.com/e/abc123',
+        '/bypass?url=https://new3.multicloudlinks.com/view/pwyufn',
       ],
     });
   }
@@ -240,17 +240,13 @@ app.get('/playlist', rateLimit(30), async (req, res) => {
   }
 });
 
-// ── PROXY — stream proxy with full session warming ─────────────────────
 app.get('/proxy', rateLimit(20), async (req, res) => {
   const { url, referer, cookie } = req.query;
   if (!url) return res.status(400).json({ error: 'Missing ?url=' });
-
   try {
     const { rawGet, CookieJar } = require('./src/http');
     const jar = new CookieJar();
-
-    const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
-
+    const UA  = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
     const headers = {
       'User-Agent'     : UA,
       'Accept'         : '*/*',
@@ -261,33 +257,29 @@ app.get('/proxy', rateLimit(20), async (req, res) => {
     };
     if (cookie) headers['Cookie'] = cookie;
 
-    // ── PixelDrain: warm session before proxying ──────────────────────
+    // pixeldrain session warming
     const isPd = url.includes('pixeldrain');
     if (isPd) {
       const fileId = url.match(/\/file\/([A-Za-z0-9]+)/)?.[1];
       if (fileId) {
         const pdHost = new URL(url).hostname;
-        // step 1: load viewer page — sets session cookies
         await rawGet(`https://${pdHost}/u/${fileId}`, {
           jar,
           headers        : { 'User-Agent': UA, 'Accept': 'text/html,*/*' },
           followRedirects: true,
           timeout        : 10000,
         }).catch(() => {});
-        // step 2: hit info API — warms CDN session
         await rawGet(`https://${pdHost}/api/file/${fileId}/info`, {
           jar,
           headers: { 'User-Agent': UA, 'Referer': `https://${pdHost}/u/${fileId}` },
           timeout: 5000,
         }).catch(() => {});
-        // step 3: set correct headers for final request
         headers['Referer'] = `https://${pdHost}/u/${fileId}`;
         headers['Origin']  = `https://${pdHost}`;
         try { headers['Cookie'] = jar.header(); } catch {}
       }
     }
 
-    // ── Fetch upstream ────────────────────────────────────────────────
     const upstream = await rawGet(url, {
       jar,
       headers,
@@ -295,9 +287,8 @@ app.get('/proxy', rateLimit(20), async (req, res) => {
       timeout        : 30000,
     });
 
-    if (!upstream || !upstream.body) {
+    if (!upstream || !upstream.body)
       return res.status(502).json({ error: 'Empty response from upstream' });
-    }
 
     const ct = upstream.headers?.['content-type'] || 'application/octet-stream';
     const cl = upstream.headers?.['content-length'];
@@ -312,7 +303,6 @@ app.get('/proxy', rateLimit(20), async (req, res) => {
     if (cr) res.setHeader('Content-Range', cr);
     if (ac) res.setHeader('Accept-Ranges', ac);
 
-    // ── m3u8 — rewrite segment URLs through proxy ─────────────────────
     if (ct.includes('mpegurl') || url.includes('.m3u8')) {
       const baseUrl   = url.substring(0, url.lastIndexOf('/') + 1);
       const rewritten = (upstream.body || '')
@@ -335,6 +325,147 @@ app.get('/proxy', rateLimit(20), async (req, res) => {
 });
 
 // ══════════════════════════════════════════════════════════════════════════
+// DEBUG — REMOVE AFTER FIX
+// ══════════════════════════════════════════════════════════════════════════
+
+app.get('/debug-mc', rateLimit(10), async (req, res) => {
+  const { rawGet, rawPost, CookieJar } = require('./src/http');
+  const url = req.query.url || 'https://new3.multicloudlinks.com/view/pwyufn';
+  const jar = new CookieJar();
+  const UA  = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+  const results = {};
+
+  try {
+    // step 1: GET page
+    const r    = await rawGet(url, {
+      jar,
+      headers: {
+        'User-Agent': UA,
+        'Accept'    : 'text/html,*/*',
+        'Referer'   : 'https://www.google.com/',
+      },
+      followRedirects: true,
+      timeout        : 15000,
+    });
+    const html = r.body || '';
+
+    results.page = {
+      status      : r.status,
+      finalUrl    : r.finalUrl,
+      length      : html.length,
+      snippet     : html.slice(0, 4000),
+      all_hrefs   : [...html.matchAll(/href=["']([^"']+)["']/g)]
+                      .map(m => m[1])
+                      .filter(h => h.startsWith('http')),
+      forms       : [...html.matchAll(/<form[^>]*>([\s\S]*?)<\/form>/gi)]
+                      .map(m => m[0].slice(0, 500)),
+      script_urls : [...html.matchAll(/https?:\/\/[^\s"'<>]+/g)]
+                      .map(m => m[0])
+                      .filter(u => u.includes('download') || u.includes('cdn') ||
+                                   u.includes('r2') || u.includes('token') ||
+                                   u.includes('multidownload') || u.includes('dr1'))
+                      .slice(0, 20),
+      cookies     : r.headers?.['set-cookie'],
+    };
+
+    // find CSRF token
+    const token = html.match(/(?:_token|csrf_token)\s*[=:]\s*["']([^"']+)["']/)?.[1]
+               || html.match(/<input[^>]+name="_token"[^>]+value="([^"]+)"/)?.[1]
+               || html.match(/meta.*csrf.*content="([^"]+)"/i)?.[1];
+    results.csrf_token = token;
+
+    // step 2: POST with token
+    if (token) {
+      try {
+        const postR = await rawPost(url, `_token=${token}`, {
+          jar,
+          headers: {
+            'Content-Type'    : 'application/x-www-form-urlencoded',
+            'User-Agent'      : UA,
+            'Referer'         : url,
+            'X-Requested-With': 'XMLHttpRequest',
+            'Accept'          : 'application/json, text/html, */*',
+          },
+          followRedirects: true,
+          timeout        : 15000,
+        });
+        results.post_response = {
+          status : postR.status,
+          length : (postR.body || '').length,
+          snippet: (postR.body || '').slice(0, 4000),
+          hrefs  : [...(postR.body || '').matchAll(/href=["']([^"']+)["']/g)]
+                     .map(m => m[1])
+                     .filter(h => h.startsWith('http')),
+          cdn_urls: [...(postR.body || '').matchAll(/https?:\/\/[^\s"'<>]+/g)]
+                     .map(m => m[0])
+                     .filter(u => u.includes('multidownload') || u.includes('r2') ||
+                                  u.includes('cdn') || u.includes('dr1') ||
+                                  u.includes('token') || u.includes('exp='))
+                     .slice(0, 20),
+        };
+      } catch(e) { results.post_error = e.message; }
+    }
+
+    // step 3: try /download endpoint
+    try {
+      const id  = url.match(/\/view\/([a-zA-Z0-9_-]+)/)?.[1];
+      const dlR = await rawGet(`${new URL(url).origin}/download/${id}`, {
+        jar,
+        headers        : { 'User-Agent': UA, 'Referer': url },
+        followRedirects: true,
+        timeout        : 10000,
+      });
+      results.download_endpoint = {
+        status  : dlR.status,
+        finalUrl: dlR.finalUrl,
+        snippet : (dlR.body || '').slice(0, 2000),
+        cdn_urls: [...(dlR.body || '').matchAll(/https?:\/\/[^\s"'<>]+/g)]
+                    .map(m => m[0])
+                    .filter(u => u.includes('multidownload') || u.includes('r2') ||
+                                 u.includes('dr1') || u.includes('token'))
+                    .slice(0, 10),
+      };
+    } catch(e) { results.download_endpoint_error = e.message; }
+
+    // step 4: try JSON API endpoints
+    const id = url.match(/\/view\/([a-zA-Z0-9_-]+)/)?.[1];
+    const apiEndpoints = [
+      `${new URL(url).origin}/api/file/${id}`,
+      `${new URL(url).origin}/api/view/${id}`,
+      `${new URL(url).origin}/api/download/${id}`,
+      `${new URL(url).origin}/file/${id}/download`,
+    ];
+    results.api_attempts = [];
+    for (const ep of apiEndpoints) {
+      try {
+        const apiR = await rawGet(ep, {
+          jar,
+          headers: {
+            'User-Agent': UA,
+            'Referer'   : url,
+            'Accept'    : 'application/json',
+          },
+          timeout: 8000,
+        });
+        results.api_attempts.push({
+          endpoint: ep,
+          status  : apiR.status,
+          snippet : (apiR.body || '').slice(0, 500),
+        });
+      } catch(e) {
+        results.api_attempts.push({ endpoint: ep, error: e.message });
+      }
+    }
+
+  } catch(e) {
+    results.error = e.message;
+    results.stack = e.stack?.slice(0, 500);
+  }
+
+  res.json(results);
+});
+
+// ══════════════════════════════════════════════════════════════════════════
 // HELPERS
 // ══════════════════════════════════════════════════════════════════════════
 
@@ -354,8 +485,8 @@ function _parseHlsManifest(manifest, baseUrl) {
     const line = lines[i].trim();
     if (line.startsWith('#EXT-X-STREAM-INF')) {
       const bw     = line.match(/BANDWIDTH=(\d+)/)?.[1];
-      const res    = line.match(/RESOLUTION=(\d+x\d+)/)?.[1];
-      const height = res ? parseInt(res.split('x')[1]) : null;
+      const resStr = line.match(/RESOLUTION=(\d+x\d+)/)?.[1];
+      const height = resStr ? parseInt(resStr.split('x')[1]) : null;
       const next   = lines[i + 1]?.trim();
       if (next && !next.startsWith('#')) {
         formats.push({
