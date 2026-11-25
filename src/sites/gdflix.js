@@ -38,6 +38,7 @@ class GDFlix extends BaseSite {
       'gdflix.mom',
       'gdflix.dad',
       'gdflix.sbs',
+      'gdflix.vip',
     ];
   }
 
