@@ -12,6 +12,7 @@ const SITE_FILES = [
   'streamtape.js',
   'voe.js',
   'pixeldrain.js',
+  'gdflix.js',
 ];
 
 class SiteRegistry {
