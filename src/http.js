@@ -4,23 +4,6 @@ const https = require('https');
 const http  = require('http');
 const zlib  = require('zlib');
 
-// ── Persistent agents — TCP reuse, no handshake per request ─────────────
-const HTTPS_AGENT = new https.Agent({
-  keepAlive           : true,
-  keepAliveMsecs      : 10000,
-  maxSockets          : 64,
-  maxFreeSockets      : 16,
-  timeout             : 20000,
-  rejectUnauthorized  : false,   // skip SSL verify — faster
-});
-
-const HTTP_AGENT = new http.Agent({
-  keepAlive     : true,
-  keepAliveMsecs: 10000,
-  maxSockets    : 64,
-  maxFreeSockets: 16,
-});
-
 // ── UA pool ──────────────────────────────────────────────────────────────
 const UA_POOL = [
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
@@ -78,6 +61,7 @@ class CookieJar {
   clear()   { this._m.clear(); }
 }
 
+// Global jar — shared across all site engines
 const globalJar = new CookieJar();
 
 // ── Blocked domains ──────────────────────────────────────────────────────
@@ -92,13 +76,13 @@ function isBlocked(url) {
   return BLOCKED.some(d => url.includes(d));
 }
 
-// ── Core GET — keepAlive agent, fast timeout ─────────────────────────────
+// ── Core GET ─────────────────────────────────────────────────────────────
 function rawGet(url, opts = {}) {
   return new Promise((resolve, reject) => {
     const {
       referer      = 'https://www.google.com/',
-      maxRedirects = 8,          // 15 → 8, kam hops = fast
-      timeout      = 12000,      // 25s → 12s
+      maxRedirects = 15,
+      timeout      = 25000,
       headers      : extraHeaders = {},
       jar          = globalJar,
       ua           = pickUA(),
@@ -107,15 +91,13 @@ function rawGet(url, opts = {}) {
     let hops = maxRedirects;
 
     function doReq(cur) {
-      if (isBlocked(cur)) return reject(new Error(`Blocked: ${cur}`));
+      if (isBlocked(cur)) return reject(new Error(`Blocked domain: ${cur}`));
 
       let parsed;
       try { parsed = new URL(cur); } catch (e) { return reject(new Error(`Bad URL: ${cur}`)); }
 
       const isHttps = parsed.protocol === 'https:';
       const lib     = isHttps ? https : http;
-      const agent   = isHttps ? HTTPS_AGENT : HTTP_AGENT;
-
       const headers = {
         ...buildHeaders(ua, referer, extraHeaders),
         'Cookie': jar.header(),
@@ -126,7 +108,6 @@ function rawGet(url, opts = {}) {
         port    : parsed.port || (isHttps ? 443 : 80),
         path    : parsed.pathname + parsed.search,
         method  : 'GET',
-        agent,              // ← persistent TCP
         timeout,
         headers,
       }, (res) => {
@@ -140,17 +121,15 @@ function rawGet(url, opts = {}) {
           if (hops-- <= 0) return reject(new Error('Too many redirects'));
           const next = loc.startsWith('http') ? loc : new URL(loc, cur).href;
           if (isBlocked(next)) return reject(new Error(`Blocked redirect: ${next}`));
-          // consume response body before next hop
-          res.resume();
           return doReq(next);
         }
 
-        // Body — decompress
+        // Body
         const chunks = [];
         let stream   = res;
-        const enc    = (res.headers['content-encoding'] || '').toLowerCase();
-        if      (enc === 'gzip')    stream = res.pipe(zlib.createGunzip());
-        else if (enc === 'br')      stream = res.pipe(zlib.createBrotliDecompress());
+        const enc    = res.headers['content-encoding'];
+        if (enc === 'gzip')    stream = res.pipe(zlib.createGunzip());
+        else if (enc === 'br') stream = res.pipe(zlib.createBrotliDecompress());
         else if (enc === 'deflate') stream = res.pipe(zlib.createInflate());
 
         stream.on('data',  c => chunks.push(c));
@@ -172,12 +151,12 @@ function rawGet(url, opts = {}) {
   });
 }
 
-// ── Core POST ────────────────────────────────────────────────────────────
+// POST form-data or JSON
 function rawPost(url, body, opts = {}) {
   return new Promise((resolve, reject) => {
     const {
       referer = url,
-      timeout = 10000,      // 20s → 10s
+      timeout = 20000,
       json    = false,
       jar     = globalJar,
       ua      = pickUA(),
@@ -187,7 +166,6 @@ function rawPost(url, body, opts = {}) {
     const parsed  = new URL(url);
     const isHttps = parsed.protocol === 'https:';
     const lib     = isHttps ? https : http;
-    const agent   = isHttps ? HTTPS_AGENT : HTTP_AGENT;
     const data    = json ? JSON.stringify(body) : new URLSearchParams(body).toString();
     const ct      = json ? 'application/json' : 'application/x-www-form-urlencoded';
 
@@ -203,7 +181,6 @@ function rawPost(url, body, opts = {}) {
       port    : parsed.port || (isHttps ? 443 : 80),
       path    : parsed.pathname + parsed.search,
       method  : 'POST',
-      agent,
       timeout,
       headers,
     }, (res) => {
@@ -212,18 +189,14 @@ function rawPost(url, body, opts = {}) {
 
       const loc = res.headers['location'];
       if ([301,302,303].includes(res.statusCode) && loc) {
-        res.resume();
         const next = loc.startsWith('http') ? loc : new URL(loc, url).href;
         return rawGet(next, { referer: url, jar, ua }).then(resolve).catch(reject);
       }
 
       const chunks = [];
       let stream   = res;
-      const enc    = (res.headers['content-encoding'] || '').toLowerCase();
-      if      (enc === 'gzip')    stream = res.pipe(zlib.createGunzip());
-      else if (enc === 'br')      stream = res.pipe(zlib.createBrotliDecompress());
-      else if (enc === 'deflate') stream = res.pipe(zlib.createInflate());
-
+      const enc    = res.headers['content-encoding'];
+      if (enc === 'gzip') stream = res.pipe(zlib.createGunzip());
       stream.on('data',  c => chunks.push(c));
       stream.on('error', reject);
       stream.on('end',   () => resolve({
