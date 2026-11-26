@@ -10,7 +10,7 @@ class HubCloud extends BaseSite {
     this.id      = 'hubcloud';
     this.version = '2.0.0';
     this.domains = [
-      'hubcloud.pw', 'hubcloud.cx', 'hubcloud.mov', 'hubcloud.ist',
+      'hubcloud.pw', 'hubcloud.cx', 'hubcloud.mov', 'hubcloud.ist', 'hubcloud.ink',
       'hubcloud.in', 'hubcloud.fans', 'hubcloud.club',
     ];
   }
