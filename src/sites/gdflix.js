@@ -9,7 +9,7 @@ class GDFlix extends BaseSite {
     super();
     this.name    = 'GDFlix';
     this.id      = 'gdflix';
-    this.version = '4.0.0';
+    this.version = '5.0.0';
     this.domains = [
       'gdflix.io',
       'new1.gdflix.io',  'new2.gdflix.io',  'new3.gdflix.io',
@@ -62,7 +62,7 @@ class GDFlix extends BaseSite {
       console.warn(`[gdflix] root warmup failed: ${e.message}`);
     }
 
-    // ── Step 2: File page ────────────────────────────────────────────
+    // ── Step 2: File page load ───────────────────────────────────────
     const fileUrl = `https://${host}/file/${id}`;
     const page    = await rawGet(fileUrl, {
       jar,
@@ -80,37 +80,39 @@ class GDFlix extends BaseSite {
 
     const meta = _parseMeta(html, id);
 
-    // ── FIX 1: staticKey — multiple patterns se extract ──────────────
+    // ── FIX 1: staticKey — multiple patterns ─────────────────────────
     const staticKey =
-      html.match(/formData\.append\(["']key["'],\s*["']([a-f0-9]{40})["']\)/)?.[1]       ||
-      html.match(/var\s+key\s*=\s*["']([a-f0-9]{40})["']/)?.[1]                           ||
-      html.match(/name=["']key["']\s+value=["']([a-f0-9]{40})["']/)?.[1]                  ||
-      html.match(/["']key["']\s*:\s*["']([a-f0-9]{40})["']/)?.[1]                         ||
-      html.match(/data-key=["']([a-f0-9]{40})["']/)?.[1]                                   ||
+      html.match(/formData\.append\(["']key["'],\s*["']([a-f0-9]{40})["']\)/)?.[1]  ||
+      html.match(/var\s+key\s*=\s*["']([a-f0-9]{40})["']/)?.[1]                      ||
+      html.match(/name=["']key["']\s+value=["']([a-f0-9]{40})["']/)?.[1]             ||
+      html.match(/["']key["']\s*:\s*["']([a-f0-9]{40})["']/)?.[1]                    ||
+      html.match(/data-key=["']([a-f0-9]{40})["']/)?.[1]                              ||
+      html.match(/append\("key",\s*"([a-f0-9]{40})"\)/)?.[1]                          ||
       '0ae13449dc27736320b4b05d1d9adb1d8d8d3694';
 
-    // ── FIX 2: action_token — page se nikalo ─────────────────────────
+    // ── FIX 2: action_token — page se extract ────────────────────────
     const actionToken =
-      html.match(/name=["']action_token["']\s+value=["']([^"']+)["']/)?.[1]              ||
-      html.match(/["']action_token["']\s*:\s*["']([^"']{10,})["']/)?.[1]                  ||
-      html.match(/action_token['"]\s*,\s*['"]([^'"]{10,})['"]/)?.[1]                      ||
-      html.match(/var\s+action_token\s*=\s*["']([^"']+)["']/)?.[1]                        ||
+      html.match(/name=["']action_token["']\s+value=["']([^"']+)["']/)?.[1]         ||
+      html.match(/["']action_token["']\s*:\s*["']([^"']{10,})["']/)?.[1]             ||
+      html.match(/action_token['"]\s*,\s*['"]([^'"]{10,})['"]/)?.[1]                 ||
+      html.match(/var\s+action_token\s*=\s*["']([^"']+)["']/)?.[1]                   ||
+      html.match(/cf_token\s*=\s*["']([^"']+)["']/)?.[1]                              ||
       '';
 
-    console.log(`[gdflix] host=${host} id=${id} key=${staticKey} action_token=${actionToken ? actionToken.slice(0,10)+'...' : 'EMPTY'}`);
+    console.log(`[gdflix] host=${host} id=${id} key=${staticKey} token=${actionToken ? actionToken.slice(0,8)+'...' : 'EMPTY'}`);
 
-    // ── Step 3: Visible links ────────────────────────────────────────
-    const serverLinks = _extractAllLinks(html);
+    // ── Step 3: Visible links — host pass karo ───────────────────────
+    const serverLinks = _extractAllLinks(html, host);
     console.log(`[gdflix] visible links: ${serverLinks.length}`);
-    serverLinks.forEach(l => console.log(`  → [${l.type}] ${l.label} :: ${l.url.slice(0, 80)}`));
+    serverLinks.forEach(l => console.log(`  → [${l.type}] ${l.label} :: ${l.url.slice(0, 90)}`));
 
     const finalServers = [];
 
     // ── Step 4: POST — 3 variants try karo ───────────────────────────
     const postVariants = [
-      { action: 'original',  key: staticKey, action_token: actionToken },
-      { action: 'download',  key: staticKey, action_token: actionToken },
-      { action: 'direct',    key: staticKey, action_token: actionToken },
+      { action: 'original', key: staticKey, action_token: actionToken },
+      { action: 'download', key: staticKey, action_token: actionToken },
+      { action: 'direct',   key: staticKey, action_token: actionToken },
     ];
 
     for (const variant of postVariants) {
@@ -120,8 +122,9 @@ class GDFlix extends BaseSite {
         if (postResult.length > 0) {
           finalServers.push(...postResult);
           console.log(`[gdflix] POST [${variant.action}]: ${postResult.length} links`);
-          // agar direct link mila toh baaki variants skip karo
-          const hasReal = postResult.some(s => !['telegram','direct-fallback'].includes(s.server));
+          const hasReal = postResult.some(s =>
+            !['telegram', 'direct-fallback', 'unknown'].includes(s.server)
+          );
           if (hasReal) break;
         }
       } catch (e) {
@@ -131,7 +134,6 @@ class GDFlix extends BaseSite {
 
     // ── Step 5: Visible links chain ──────────────────────────────────
     for (const link of serverLinks) {
-      // telegram already add ho gaya hai POST se — skip
       if (finalServers.some(s => s.url === link.url)) continue;
       try {
         const servers = await _processLink(link, jar, UA, host);
@@ -147,27 +149,33 @@ class GDFlix extends BaseSite {
       }
     }
 
-    // ── FIX 3: Agar sirf telegram mila — page se JS URLs bhi nikalo ──
+    // ── Step 6: Agar sirf telegram — JS scan ─────────────────────────
     const hasRealServer = finalServers.some(s =>
       !['telegram', 'direct-fallback', 'unknown'].includes(s.server)
     );
 
     if (!hasRealServer) {
-      console.log('[gdflix] only telegram found — trying JS/inline URL extraction');
-      const jsLinks = _extractJsLinks(html);
-      console.log(`[gdflix] JS extraction: ${jsLinks.length} links`);
+      console.log('[gdflix] only telegram — trying JS extraction');
+      const jsLinks = _extractJsLinks(html, host);
+      console.log(`[gdflix] JS links: ${jsLinks.length}`);
       for (const link of jsLinks) {
         if (finalServers.some(s => s.url === link.url)) continue;
         try {
           const servers = await _processLink(link, jar, UA, host);
           finalServers.push(...servers);
         } catch {
-          finalServers.push({ label: link.label, url: link.url, server: link.type, via: 'js-fallback' });
+          finalServers.push({
+            label : link.label,
+            url   : link.url,
+            server: link.type,
+            via   : 'js-fallback',
+          });
         }
       }
     }
 
-    if (finalServers.length === 0) throw new Error(`GDFlix: koi server nahi mila on ${host}`);
+    if (finalServers.length === 0)
+      throw new Error(`GDFlix: koi server nahi mila on ${host}`);
 
     // Deduplicate
     const seen   = new Set();
@@ -178,11 +186,15 @@ class GDFlix extends BaseSite {
     });
 
     // Sort: real servers pehle, telegram last
-    unique.sort((a, b) => {
-      const priority = { r2: 0, busycdn: 1, instant: 1, mgt: 2, cloud: 3,
-                         pixeldrain: 4, gofile: 5, hubcloud: 6, telegram: 99 };
-      return (priority[a.server] ?? 50) - (priority[b.server] ?? 50);
-    });
+    const priority = {
+      instant: 0, r2: 1, busycdn: 1, mgt: 2, cloud: 3,
+      pixeldrain: 4, gofile: 5, hubcloud: 6,
+      gdrive: 7, mega: 8, mediafire: 9,
+      telegram: 99,
+    };
+    unique.sort((a, b) =>
+      (priority[a.server] ?? 50) - (priority[b.server] ?? 50)
+    );
 
     console.log(`[gdflix] done — ${unique.length} unique servers`);
     return this._result(id, meta, unique);
@@ -190,7 +202,7 @@ class GDFlix extends BaseSite {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  POST bypass — 3 variants support
+//  POST bypass
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function _postBypass(fileId, host, jar, UA, { action, key, action_token }) {
@@ -221,42 +233,33 @@ async function _postBypass(fileId, host, jar, UA, { action, key, action_token })
     timeout: 20000,
   });
 
-  // ── FIX 4: response properly parse karo ──────────────────────────────
-  let json = null;
-  try {
-    const bodyStr = typeof res.body === 'string' ? res.body : JSON.stringify(res.body);
-    // JSON ke alawa HTML bhi aa sakta hai — dono handle karo
-    if (bodyStr.trim().startsWith('{') || bodyStr.trim().startsWith('[')) {
-      json = JSON.parse(bodyStr);
-    } else {
-      // HTML response — links directly extract karo
-      const html    = _decodeHtml(bodyStr);
-      const links   = _extractAllLinks(html);
-      const jsLinks = _extractJsLinks(html);
-      return [...links, ...jsLinks].map(l => ({
-        label : l.label,
-        url   : l.url,
-        server: l.type,
-        via   : `post-html-${action}`,
-      }));
-    }
-  } catch {
-    return [];
+  const bodyStr = typeof res.body === 'string' ? res.body : JSON.stringify(res.body || '');
+
+  // HTML response — links directly extract karo
+  if (!bodyStr.trim().startsWith('{') && !bodyStr.trim().startsWith('[')) {
+    const html    = _decodeHtml(bodyStr);
+    const links   = _extractAllLinks(html, host);
+    const jsLinks = _extractJsLinks(html, host);
+    return [...links, ...jsLinks].map(l => ({
+      label : l.label,
+      url   : l.url,
+      server: l.type,
+      via   : `post-html-${action}`,
+    }));
   }
 
+  let json = null;
+  try { json = JSON.parse(bodyStr); } catch { return []; }
   if (!json) return [];
 
-  const servers  = [];
+  const servers      = [];
   const urlsToProcess = [];
 
-  // json.url, json.visit_url, json.download_url — sab check karo
   for (const field of ['url', 'visit_url', 'download_url', 'link', 'direct']) {
-    if (json[field] && typeof json[field] === 'string' && json[field].startsWith('http')) {
-      urlsToProcess.push(json[field]);
-    }
+    const v = json[field];
+    if (v && typeof v === 'string' && v.startsWith('http')) urlsToProcess.push(v);
   }
 
-  // json.servers array bhi ho sakta hai
   if (Array.isArray(json.servers)) {
     for (const s of json.servers) {
       const u = s.url || s.link || s.href;
@@ -270,7 +273,12 @@ async function _postBypass(fileId, host, jar, UA, { action, key, action_token })
       const chained = await _processLink(fakeLink, jar, UA, host);
       servers.push(...chained);
     } catch {
-      servers.push({ label: fakeLink.label, url: u, server: fakeLink.type, via: `post-${action}` });
+      servers.push({
+        label : fakeLink.label,
+        url   : u,
+        server: fakeLink.type,
+        via   : `post-${action}`,
+      });
     }
   }
 
@@ -278,10 +286,154 @@ async function _postBypass(fileId, host, jar, UA, { action, key, action_token })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  FIX 5: JS inline links — window.location, fetch, ajax URLs
+//  _extractAllLinks — host parameter added, new patterns added
 // ─────────────────────────────────────────────────────────────────────────────
 
-function _extractJsLinks(html) {
+function _extractAllLinks(html, host = '') {
+  const links = [], seen = new Set();
+  const push  = (type, url, label) => {
+    if (!url || !url.startsWith('http') || seen.has(url)) return;
+    seen.add(url);
+    links.push({ type, url, label });
+  };
+  let m;
+
+  // ── FIX: Relative URLs ko absolute banao ─────────────────────────
+  const abs = (path) => {
+    if (!path) return null;
+    if (path.startsWith('http')) return path;
+    if (path.startsWith('/') && host) return `https://${host}${path}`;
+    return null;
+  };
+
+  // foxcloud2 workers — Instant DL (PAGE PE YEH THA)
+  const foxRe = /href=["'](https?:\/\/generate\.foxcloud2\.workers\.dev\/[^\s"'<>]+)["']/gi;
+  while ((m = foxRe.exec(html)) !== null) push('instant', m[1], 'Instant DL [10GBPS]');
+
+  // BusyCDN / InstaDL
+  const busyRe = /href=["'](https?:\/\/busycdn\.[^\s"'<>]+)["']/gi;
+  while ((m = busyRe.exec(html)) !== null) push('instant', m[1], 'Instant DL [10GBPS]');
+
+  const instadlRe = /href=["'](https?:\/\/[a-z0-9-]+\.instadl\.[^\s"'<>]+)["']/gi;
+  while ((m = instadlRe.exec(html)) !== null) push('instant', m[1], 'Instant DL [10GBPS]');
+
+  // Any *.workers.dev generate links
+  const workersRe = /href=["'](https?:\/\/[a-z0-9-]+\.workers\.dev\/\?url=[^\s"'<>]+)["']/gi;
+  while ((m = workersRe.exec(html)) !== null) push('instant', m[1], 'Instant DL [Workers]');
+
+  // R2 public bucket (href)
+  const r2HrefRe = /href=["'](https?:\/\/pub-[a-f0-9]+\.r2\.dev\/[^\s"'<>]+)["']/gi;
+  while ((m = r2HrefRe.exec(html)) !== null) push('r2', m[1], 'Cloud Download [R2]');
+
+  // R2 embedded in JS
+  const r2JsRe = /(https?:\/\/pub-[a-f0-9]+\.r2\.dev\/[a-f0-9]+\?token=[0-9]+)/g;
+  while ((m = r2JsRe.exec(html)) !== null) push('r2', m[1], 'Cloud Download [R2]');
+
+  // /cloud/ — relative (SAME HOST)
+  const cloudRelRe = /href=["'](\/cloud\/[^\s"'<>]+)["']/gi;
+  while ((m = cloudRelRe.exec(html)) !== null) {
+    const u = abs(m[1]);
+    if (u) push('cloud', u, 'Fast Cloud / ZipDisk');
+  }
+
+  // /cloud/ — absolute
+  const cloudAbsRe = /href=["'](https?:\/\/[^\s"'<>]+\/cloud\/[^\s"'<>]+)["']/gi;
+  while ((m = cloudAbsRe.exec(html)) !== null) push('cloud', m[1], 'Fast Cloud / ZipDisk');
+
+  // /cflare/ — relative
+  const cflareRelRe = /href=["'](\/cflare\/[^\s"'<>]+)["']/gi;
+  while ((m = cflareRelRe.exec(html)) !== null) {
+    const u = abs(m[1]);
+    if (u) push('cloud', u, 'Fast Cloud / Cflare');
+  }
+
+  // /cflare/ — absolute
+  const cflareAbsRe = /href=["'](https?:\/\/[^\s"'<>]+\/cflare\/[^\s"'<>]+)["']/gi;
+  while ((m = cflareAbsRe.exec(html)) !== null) push('cloud', m[1], 'Fast Cloud / Cflare');
+
+  // bolt.indexserver.shop — MGT Direct (PAGE PE YEH THA)
+  const boltRe = /href=["'](https?:\/\/bolt\.indexserver\.shop\/[^\s"'<>]+)["']/gi;
+  while ((m = boltRe.exec(html)) !== null) push('mgt', m[1], 'Direct Server [MGT]');
+
+  // speed-dl MGT
+  const mgtRe = /href=["'](https?:\/\/speed-dl\.[^\s"'<>]+)["']/gi;
+  while ((m = mgtRe.exec(html)) !== null) push('mgt', m[1], 'Direct Server [MGT]');
+
+  // mxgserver workers
+  const mxgRe = /href=["'](https?:\/\/[a-z0-9-]+\.mxgserver\.workers\.dev\/[^\s"'<>]+)["']/gi;
+  while ((m = mxgRe.exec(html)) !== null) push('mgt', m[1], 'Direct Server [MGT]');
+
+  // PixelDrain
+  const pdRe = /href=["'](https?:\/\/pixeldrain(?:\.dev|\.com)\/u\/[a-zA-Z0-9]+)["']/gi;
+  while ((m = pdRe.exec(html)) !== null) push('pixeldrain', m[1], 'PixelDrain DL');
+
+  // Telegram / FileGram
+  const tgRe = /href=["'](https?:\/\/filesgram\.xyz\/[^\s"'<>]+)["']/gi;
+  while ((m = tgRe.exec(html)) !== null) push('telegram', m[1], 'Telegram File');
+
+  // GoFile — direct
+  const gfRe = /href=["'](https?:\/\/gofile\.io\/d\/[a-zA-Z0-9]+)["']/gi;
+  while ((m = gfRe.exec(html)) !== null) push('gofile', m[1], 'GoFile Server');
+
+  // GoFile — goflix.sbs mirror
+  const gfxRe = /href=["'](https?:\/\/goflix\.sbs\/[^\s"'<>]+)["']/gi;
+  while ((m = gfxRe.exec(html)) !== null) push('gofile', m[1], 'GoFile [Multiup]');
+
+  // /realtime/multiup.php — GoFile generate (relative) (PAGE PE YEH THA)
+  const multiupRelRe = /href=["'](\/realtime\/multiup\.php\?[^\s"'<>]+)["']/gi;
+  while ((m = multiupRelRe.exec(html)) !== null) {
+    const u = abs(m[1]);
+    if (u) push('gofile', u, 'GoFile [Generate]');
+  }
+
+  // HubCloud
+  const hcRe = /href=["'](https?:\/\/hubcloud\.[a-z]+\/(?:drive|d|file)\/[a-zA-Z0-9_-]+)["']/gi;
+  while ((m = hcRe.exec(html)) !== null) push('hubcloud', m[1], 'HubCloud Server');
+
+  // Google Drive
+  const gdRe = /href=["'](https?:\/\/drive\.google\.com\/[^\s"'<>]+)["']/gi;
+  while ((m = gdRe.exec(html)) !== null) push('gdrive', m[1], 'Google Drive');
+
+  // Mega
+  const mgRe = /href=["'](https?:\/\/mega\.nz\/[^\s"'<>]+)["']/gi;
+  while ((m = mgRe.exec(html)) !== null) push('mega', m[1], 'Mega.nz');
+
+  // MediaFire
+  const mfRe = /href=["'](https?:\/\/[^\s"'<>]*mediafire[^\s"'<>]+)["']/gi;
+  while ((m = mfRe.exec(html)) !== null) push('mediafire', m[1], 'MediaFire');
+
+  // BuzzHeavier
+  const bzRe = /href=["'](https?:\/\/[^\s"'<>]*buzzheavier[^\s"'<>]+)["']/gi;
+  while ((m = bzRe.exec(html)) !== null) push('buzzheavier', m[1], 'BuzzHeavier');
+
+  // FuckingFast
+  const ffRe = /href=["'](https?:\/\/fuckingfast\.net\/[^\s"'<>]+)["']/gi;
+  while ((m = ffRe.exec(html)) !== null) push('fuckingfast', m[1], 'FuckingFast');
+
+  // TeraBox
+  const tbRe = /href=["'](https?:\/\/[^\s"'<>]*terabox[^\s"'<>]+)["']/gi;
+  while ((m = tbRe.exec(html)) !== null) push('terabox', m[1], 'TeraBox');
+
+  // 1Fichier
+  const ofRe = /href=["'](https?:\/\/1fichier\.com\/[^\s"'<>]+)["']/gi;
+  while ((m = ofRe.exec(html)) !== null) push('1fichier', m[1], '1Fichier');
+
+  // OneDrive
+  const odRe = /href=["'](https?:\/\/1drv\.ms\/[^\s"'<>]+|https?:\/\/onedrive\.live[^\s"'<>]+)["']/gi;
+  while ((m = odRe.exec(html)) !== null) push('onedrive', m[1], 'OneDrive');
+
+  // Dropbox
+  const dboxRe = /href=["'](https?:\/\/[^\s"'<>]*dropbox\.com[^\s"'<>]+)["']/gi;
+  while ((m = dboxRe.exec(html)) !== null) push('dropbox', m[1], 'Dropbox');
+
+  return links;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  _extractJsLinks — host parameter added
+// ─────────────────────────────────────────────────────────────────────────────
+
+function _extractJsLinks(html, host = '') {
   const links = [], seen = new Set();
   const push  = (type, url, label) => {
     if (!url || !url.startsWith('http') || seen.has(url)) return;
@@ -289,52 +441,74 @@ function _extractJsLinks(html) {
     links.push({ type, url, label });
   };
 
+  const abs = (path) => {
+    if (!path) return null;
+    if (path.startsWith('http')) return path;
+    if (path.startsWith('/') && host) return `https://${host}${path}`;
+    return null;
+  };
+
+  let m;
+
   // window.open / window.location
   const winRe = /window\.(?:open|location(?:\.href)?)\s*[=(]\s*["'](https?:\/\/[^"']+)["']/g;
-  let m;
   while ((m = winRe.exec(html)) !== null) {
-    const classified = _classifyUrl(m[1]);
-    push(classified.type, m[1], classified.label);
+    const c = _classifyUrl(m[1]);
+    push(c.type, m[1], c.label);
   }
 
   // fetch() / ajax url:
   const fetchRe = /(?:fetch|url)\s*[:(]\s*["'](https?:\/\/[^"']+)["']/g;
   while ((m = fetchRe.exec(html)) !== null) {
-    const classified = _classifyUrl(m[1]);
-    push(classified.type, m[1], classified.label);
+    const c = _classifyUrl(m[1]);
+    push(c.type, m[1], c.label);
   }
 
-  // var/const/let links
+  // var/const/let with download-related URLs
   const varRe = /(?:var|const|let)\s+\w+\s*=\s*["'](https?:\/\/[^"']{20,})["']/g;
   while ((m = varRe.exec(html)) !== null) {
     const u = m[1];
-    if (u.includes('cdn') || u.includes('r2') || u.includes('download') ||
-        u.includes('busycdn') || u.includes('token') || u.includes('.mkv') ||
-        u.includes('.mp4') || u.includes('pixeldrain') || u.includes('gofile')) {
-      const classified = _classifyUrl(u);
-      push(classified.type, u, classified.label);
+    if (
+      u.includes('cdn') || u.includes('r2') || u.includes('download') ||
+      u.includes('busycdn') || u.includes('token') || u.includes('.mkv') ||
+      u.includes('.mp4') || u.includes('pixeldrain') || u.includes('gofile') ||
+      u.includes('workers.dev') || u.includes('indexserver') || u.includes('foxcloud')
+    ) {
+      const c = _classifyUrl(u);
+      push(c.type, u, c.label);
     }
   }
 
   // data-url / data-href attributes
   const dataRe = /data-(?:url|href|link|src)=["'](https?:\/\/[^"']+)["']/g;
   while ((m = dataRe.exec(html)) !== null) {
-    const classified = _classifyUrl(m[1]);
-    push(classified.type, m[1], classified.label);
+    const c = _classifyUrl(m[1]);
+    push(c.type, m[1], c.label);
   }
 
-  // action= form targets
-  const actionRe = /action=["'](https?:\/\/[^"']+)["']/g;
+  // action= form targets — relative bhi
+  const actionRe = /action=["']([^"']+)["']/g;
   while ((m = actionRe.exec(html)) !== null) {
-    const classified = _classifyUrl(m[1]);
-    push(classified.type, m[1], classified.label);
+    const u = abs(m[1]);
+    if (u) {
+      const c = _classifyUrl(u);
+      push(c.type, u, c.label);
+    }
   }
+
+  // foxcloud2 in script tags
+  const foxJsRe = /(https?:\/\/generate\.foxcloud2\.workers\.dev\/\?url=[^\s"'<>]+)/g;
+  while ((m = foxJsRe.exec(html)) !== null) push('instant', m[1], 'Instant DL [10GBPS]');
+
+  // bolt.indexserver in script tags
+  const boltJsRe = /(https?:\/\/bolt\.indexserver\.shop\/[^\s"'<>]+)/g;
+  while ((m = boltJsRe.exec(html)) !== null) push('mgt', m[1], 'Direct Server [MGT]');
 
   return links;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Link dispatcher (unchanged from original)
+//  Link dispatcher
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function _processLink(link, jar, UA, gdflixHost) {
@@ -362,75 +536,144 @@ async function _processLink(link, jar, UA, gdflixHost) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Chain handlers (all unchanged from original)
+//  Chain: Instant DL / foxcloud
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function _chainInstantDL(url, jar, UA, gdflixHost) {
-  const res = await rawGet(url, {
-    jar,
-    headers        : _headers(UA, `https://${gdflixHost}/`),
-    followRedirects: true,
-    timeout        : 20000,
-  });
-  const finalUrl = res.finalUrl || url;
-  if (finalUrl !== url && !finalUrl.includes('instadl') && !finalUrl.includes('busycdn')) {
-    return [{ label: 'Instant DL [10GBPS]', url: finalUrl, server: 'busycdn', via: 'instadl-redirect' }];
+  try {
+    const res      = await rawGet(url, {
+      jar,
+      headers        : _headers(UA, `https://${gdflixHost}/`),
+      followRedirects: true,
+      timeout        : 20000,
+    });
+    const finalUrl = res.finalUrl || url;
+
+    if (finalUrl !== url &&
+        !finalUrl.includes('instadl') &&
+        !finalUrl.includes('busycdn') &&
+        !finalUrl.includes('foxcloud')) {
+      return [{ label: 'Instant DL [10GBPS]', url: finalUrl, server: 'busycdn', via: 'instadl-redirect' }];
+    }
+
+    const html  = _decodeHtml(res.body || '');
+    const links = _extractAllLinks(html, gdflixHost);
+    if (links.length > 0) {
+      return links.map(l => ({ label: l.label, url: l.url, server: l.type, via: 'instadl-page' }));
+    }
+  } catch (e) {
+    console.warn(`[gdflix] _chainInstantDL failed: ${e.message}`);
   }
-  const html  = _decodeHtml(res.body || '');
-  const links = _extractAllLinks(html);
-  if (links.length > 0) {
-    return links.map(l => ({ label: l.label, url: l.url, server: l.type, via: 'instadl-page' }));
-  }
+
+  // foxcloud redirect follow karo — final URL hi download link hai
   return [{ label: 'Instant DL [10GBPS]', url, server: 'busycdn', via: 'instadl-direct' }];
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+//  Chain: Cloud / ZipDisk
+// ─────────────────────────────────────────────────────────────────────────────
+
 async function _chainCloud(url, jar, UA, gdflixHost) {
-  const res = await rawGet(url, {
-    jar,
-    headers        : _headers(UA, `https://${gdflixHost}/`),
-    followRedirects: true,
-    timeout        : 20000,
-  });
-  const finalUrl = res.finalUrl || url;
-  if (finalUrl !== url && !finalUrl.includes(gdflixHost)) {
-    return [{ label: 'Fast Cloud / ZipDisk', url: finalUrl, server: 'cloud', via: 'cloud-redirect' }];
+  try {
+    const res      = await rawGet(url, {
+      jar,
+      headers        : _headers(UA, `https://${gdflixHost}/`),
+      followRedirects: true,
+      timeout        : 20000,
+    });
+    const finalUrl = res.finalUrl || url;
+
+    if (finalUrl !== url && !finalUrl.includes(gdflixHost)) {
+      return [{ label: 'Fast Cloud / ZipDisk', url: finalUrl, server: 'cloud', via: 'cloud-redirect' }];
+    }
+
+    const html   = _decodeHtml(res.body || '');
+    const dlLink = html.match(/href=["'](https?:\/\/[^"']*(?:\.r2\.dev|cdn|\.mkv|\.mp4|\.zip)[^"']*)["']/i)?.[1];
+    if (dlLink) return [{ label: 'Fast Cloud / ZipDisk', url: dlLink, server: 'cloud', via: 'cloud-href' }];
+
+    const iframe = html.match(/<iframe[^>]+src=["'](https?:\/\/[^"']+)["']/i)?.[1];
+    if (iframe)  return [{ label: 'Fast Cloud / ZipDisk', url: iframe, server: 'cloud', via: 'cloud-iframe' }];
+  } catch (e) {
+    console.warn(`[gdflix] _chainCloud failed: ${e.message}`);
   }
-  const html   = _decodeHtml(res.body || '');
-  const dlLink = html.match(/href=["'](https?:\/\/[^"']*(?:\.r2\.dev|cdn|\.mkv|\.mp4|\.zip)[^"']*)["']/i)?.[1];
-  if (dlLink) return [{ label: 'Fast Cloud / ZipDisk', url: dlLink, server: 'cloud', via: 'cloud-href' }];
-  const iframe = html.match(/<iframe[^>]+src=["'](https?:\/\/[^"']+)["']/i)?.[1];
-  if (iframe)  return [{ label: 'Fast Cloud / ZipDisk', url: iframe, server: 'cloud', via: 'cloud-iframe' }];
+
   return [{ label: 'Fast Cloud / ZipDisk', url, server: 'cloud', via: 'cloud-direct' }];
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+//  Chain: MGT / bolt.indexserver
+// ─────────────────────────────────────────────────────────────────────────────
+
 async function _chainMGT(url, jar, UA, gdflixHost) {
-  const res = await rawGet(url, {
-    jar,
-    headers        : _headers(UA, `https://${gdflixHost}/`),
-    followRedirects: true,
-    timeout        : 15000,
-  });
-  const finalUrl = res.finalUrl || url;
-  if (finalUrl !== url) {
-    return [{ label: 'Direct Server [MGT]', url: finalUrl, server: 'mgt', via: 'mgt-redirect' }];
+  try {
+    const res      = await rawGet(url, {
+      jar,
+      headers        : _headers(UA, `https://${gdflixHost}/`),
+      followRedirects: true,
+      timeout        : 15000,
+    });
+    const finalUrl = res.finalUrl || url;
+
+    if (finalUrl !== url) {
+      return [{ label: 'Direct Server [MGT]', url: finalUrl, server: 'mgt', via: 'mgt-redirect' }];
+    }
+
+    const html   = _decodeHtml(res.body || '');
+    const dlLink = html.match(/href=["'](https?:\/\/[^"']*(?:\.mkv|\.mp4|\.r2\.dev|download)[^"']*)["']/i)?.[1];
+    if (dlLink) return [{ label: 'Direct Server [MGT]', url: dlLink, server: 'mgt', via: 'mgt-href' }];
+  } catch (e) {
+    console.warn(`[gdflix] _chainMGT failed: ${e.message}`);
   }
-  const html   = _decodeHtml(res.body || '');
-  const dlLink = html.match(/href=["'](https?:\/\/[^"']*(?:\.mkv|\.mp4|\.r2\.dev|download)[^"']*)["']/i)?.[1];
-  if (dlLink) return [{ label: 'Direct Server [MGT]', url: dlLink, server: 'mgt', via: 'mgt-href' }];
+
   return [{ label: 'Direct Server [MGT]', url, server: 'mgt', via: 'mgt-direct' }];
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Chain: PixelDrain
+// ─────────────────────────────────────────────────────────────────────────────
 
 async function _chainPixelDrain(url) {
   const id = url.match(/\/u\/([a-zA-Z0-9]+)/)?.[1];
   if (!id) return [{ label: 'PixelDrain', url, server: 'pixeldrain', via: 'direct' }];
-  return [{ label: 'PixelDrain [Direct]', url: `https://pixeldrain.com/api/file/${id}?download`, server: 'pixeldrain', via: 'pixeldrain-api' }];
+  return [{
+    label : 'PixelDrain [Direct]',
+    url   : `https://pixeldrain.com/api/file/${id}?download`,
+    server: 'pixeldrain',
+    via   : 'pixeldrain-api',
+  }];
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+//  Chain: GoFile
+// ─────────────────────────────────────────────────────────────────────────────
+
 async function _chainGoFile(url) {
+  // /realtime/multiup.php — generate karke redirect follow karo
+  if (url.includes('/realtime/multiup.php')) {
+    try {
+      const res = await rawGet(url, { followRedirects: true, timeout: 20000 });
+      const html = _decodeHtml(res.body || '');
+      const finalUrl = res.finalUrl || url;
+
+      // Final URL gofile.io ho sakta hai
+      if (finalUrl.includes('gofile.io/d/')) {
+        return _chainGoFile(finalUrl);
+      }
+
+      // HTML mein gofile link dhundo
+      const gfM = html.match(/href=["'](https?:\/\/gofile\.io\/d\/[a-zA-Z0-9]+)["']/i);
+      if (gfM) return _chainGoFile(gfM[1]);
+
+      return [{ label: 'GoFile [Generate]', url: finalUrl || url, server: 'gofile', via: 'multiup-redirect' }];
+    } catch (e) {
+      return [{ label: 'GoFile [Generate]', url, server: 'gofile', via: 'multiup-direct' }];
+    }
+  }
+
   let id = url.match(/\/d\/([a-zA-Z0-9]+)/)?.[1];
   if (!id) {
     try {
-      const res = await rawGet(url, { followRedirects: true, timeout: 10000 });
+      const res  = await rawGet(url, { followRedirects: true, timeout: 10000 });
       const html = res.body || '';
       id = html.match(/gofile\.io\/d\/([a-zA-Z0-9]+)/)?.[1]
         || (res.finalUrl || '').match(/\/d\/([a-zA-Z0-9]+)/)?.[1];
@@ -443,8 +686,12 @@ async function _chainGoFile(url) {
       hostname      : 'api.gofile.io',
       path          : '/accounts',
       method        : 'POST',
-      headers       : { 'Content-Type': 'application/json', 'Content-Length': '2',
-                        'Origin': 'https://gofile.io', 'Referer': 'https://gofile.io/' },
+      headers       : {
+        'Content-Type'  : 'application/json',
+        'Content-Length': '2',
+        'Origin'        : 'https://gofile.io',
+        'Referer'       : 'https://gofile.io/',
+      },
       timeout: 12000,
     }, res => {
       let raw = '';
@@ -469,14 +716,28 @@ async function _chainGoFile(url) {
 
   const servers  = [];
   const children = json.data?.children ? Object.values(json.data.children) : [json.data];
+
   for (const child of children) {
     if (child.type !== 'file') continue;
     const dlUrl = child.link || child.directLink;
-    if (dlUrl) servers.push({ label: `[GF] ${child.name || 'GoFile'}`, url: dlUrl, server: 'gofile', size: child.size ? _fmtSize(child.size) : undefined, via: 'gofile-api' });
+    if (dlUrl) {
+      servers.push({
+        label : `[GF] ${child.name || 'GoFile'}`,
+        url   : dlUrl,
+        server: 'gofile',
+        size  : child.size ? _fmtSize(child.size) : undefined,
+        via   : 'gofile-api',
+      });
+    }
   }
+
   if (servers.length === 0) throw new Error('GoFile: no files in content');
   return servers;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Chain: HubCloud
+// ─────────────────────────────────────────────────────────────────────────────
 
 async function _chainHubCloud(url, jar, UA) {
   let id = null;
@@ -488,6 +749,7 @@ async function _chainHubCloud(url, jar, UA) {
 
   const HOSTS = ['hubcloud.mov','hubcloud.cx','hubcloud.in','hubcloud.pw','hubcloud.fans'];
   let html1 = null, url1 = null;
+
   for (const h of HOSTS) {
     try {
       const r = await rawGet(`https://${h}/drive/${id}`, {
@@ -503,13 +765,17 @@ async function _chainHubCloud(url, jar, UA) {
   }
   if (!html1) throw new Error('HubCloud: page not reachable');
 
-  const tokenUrl = html1.match(/href=["'](https:\/\/gamerxyt\.com[^"']+)["']/i)?.[1]
-                || html1.match(/(https?:\/\/gamerxyt\.com\/[^\s"'<>]+)/i)?.[1];
+  const tokenUrl =
+    html1.match(/href=["'](https:\/\/gamerxyt\.com[^"']+)["']/i)?.[1] ||
+    html1.match(/(https?:\/\/gamerxyt\.com\/[^\s"'<>]+)/i)?.[1];
   if (!tokenUrl) throw new Error('HubCloud: gamerxyt token URL not found');
 
   await sleep(2600);
 
-  const r2      = await rawGet(tokenUrl, { headers: { 'User-Agent': UA, 'Referer': url1 }, timeout: 15000 });
+  const r2      = await rawGet(tokenUrl, {
+    headers: { 'User-Agent': UA, 'Referer': url1 },
+    timeout: 15000,
+  });
   const servers = _parseHubCloudPage(_decodeHtml(r2.body));
   if (servers.length === 0) throw new Error('HubCloud: no links on final page');
   return servers.map(s => ({ ...s, label: `[HC] ${s.label}`, via: 'hubcloud' }));
@@ -523,87 +789,52 @@ function _parseHubCloudPage(html) {
     links.push({ label, url, server });
   };
   let m;
+
   const r2Re = /href=["'](https:\/\/[a-z0-9]+\.r2\.cloudflarestorage\.com\/[^"']+)["']/gi;
   while ((m = r2Re.exec(html))  !== null) push('Direct Server', m[1], 'r2');
+
   const gpRe = /href=["'](https:\/\/gpdl\.hubcloud[^"']+)["']/gi;
   while ((m = gpRe.exec(html))  !== null) push('10Gbps Server', m[1], '10gbps');
+
   const pxJs = html.match(/var\s+pxl\s*=\s*["'](https?:\/\/pixeldrain[^"']+)["']/);
   if (pxJs) push('PixelDrain', pxJs[1], 'pixeldrain');
+
   const pxRe = /href=["'](https?:\/\/pixeldrain[^"']+)["']/gi;
   while ((m = pxRe.exec(html))  !== null) push('PixelDrain', m[1], 'pixeldrain');
+
   const ffRe = /href=["'](https:\/\/fuckingfast\.net\/[^"']+)["']/gi;
   while ((m = ffRe.exec(html))  !== null) push('Buzz Server', m[1], 'buzz');
-  return links;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-//  _extractAllLinks (unchanged)
-// ─────────────────────────────────────────────────────────────────────────────
-
-function _extractAllLinks(html) {
-  const links = [], seen = new Set();
-  const push  = (type, url, label) => {
-    if (!url || !url.startsWith('http') || seen.has(url)) return;
-    seen.add(url);
-    links.push({ type, url, label });
-  };
-  let m;
-
-  const patterns = [
-    [/href=["'](https?:\/\/busycdn\.[^\s"'<>]+)["']/gi,                        'instant',     'Instant DL [10GBPS]'],
-    [/href=["'](https?:\/\/[a-z0-9-]+\.instadl\.[^\s"'<>]+)["']/gi,            'instant',     'Instant DL [10GBPS]'],
-    [/href=["'](https?:\/\/pub-[a-f0-9]+\.r2\.dev\/[^\s"'<>]+)["']/gi,         'r2',          'Cloud Download [R2]'],
-    [/(https?:\/\/pub-[a-f0-9]+\.r2\.dev\/[a-f0-9]+\?token=[0-9]+)/g,          'r2',          'Cloud Download [R2]'],
-    [/href=["'](https?:\/\/[^\s"'<>]+\/cloud\/[^\s"'<>]+)["']/gi,              'cloud',       'Fast Cloud / ZipDisk'],
-    [/href=["'](https?:\/\/[^\s"'<>]+\/cflare\/[^\s"'<>]+)["']/gi,             'cloud',       'Fast Cloud / Cflare'],
-    [/href=["'](https?:\/\/speed-dl\.[^\s"'<>]+)["']/gi,                        'mgt',         'Direct Server [MGT]'],
-    [/href=["'](https?:\/\/[a-z0-9-]+\.mxgserver\.workers\.dev\/[^\s"'<>]+)["']/gi, 'mgt',    'Direct Server [MGT]'],
-    [/href=["'](https?:\/\/pixeldrain(?:\.dev|\.com)\/u\/[a-zA-Z0-9]+)["']/gi, 'pixeldrain',  'PixelDrain DL'],
-    [/href=["'](https?:\/\/filesgram\.xyz\/[^\s"'<>]+)["']/gi,                  'telegram',    'Telegram File'],
-    [/href=["'](https?:\/\/gofile\.io\/d\/[a-zA-Z0-9]+)["']/gi,                'gofile',      'GoFile Server'],
-    [/href=["'](https?:\/\/goflix\.sbs\/[^\s"'<>]+)["']/gi,                     'gofile',      'GoFile [Multiup]'],
-    [/href=["'](https?:\/\/hubcloud\.[a-z]+\/(?:drive|d|file)\/[a-zA-Z0-9_-]+)["']/gi, 'hubcloud', 'HubCloud Server'],
-    [/href=["'](https?:\/\/drive\.google\.com\/[^\s"'<>]+)["']/gi,              'gdrive',      'Google Drive'],
-    [/href=["'](https?:\/\/mega\.nz\/[^\s"'<>]+)["']/gi,                        'mega',        'Mega.nz'],
-    [/href=["'](https?:\/\/[^\s"'<>]*mediafire[^\s"'<>]+)["']/gi,               'mediafire',   'MediaFire'],
-    [/href=["'](https?:\/\/[^\s"'<>]*buzzheavier[^\s"'<>]+)["']/gi,             'buzzheavier', 'BuzzHeavier'],
-    [/href=["'](https?:\/\/fuckingfast\.net\/[^\s"'<>]+)["']/gi,                'fuckingfast', 'FuckingFast'],
-    [/href=["'](https?:\/\/[^\s"'<>]*terabox[^\s"'<>]+)["']/gi,                 'terabox',     'TeraBox'],
-    [/href=["'](https?:\/\/1fichier\.com\/[^\s"'<>]+)["']/gi,                   '1fichier',    '1Fichier'],
-    [/href=["'](https?:\/\/1drv\.ms\/[^\s"'<>]+|https?:\/\/onedrive\.live[^\s"'<>]+)["']/gi, 'onedrive', 'OneDrive'],
-    [/href=["'](https?:\/\/[^\s"'<>]*dropbox\.com[^\s"'<>]+)["']/gi,            'dropbox',     'Dropbox'],
-  ];
-
-  for (const [re, type, label] of patterns) {
-    while ((m = re.exec(html)) !== null) push(type, m[1], label);
-  }
 
   return links;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  _classifyUrl (unchanged)
+//  _classifyUrl
 // ─────────────────────────────────────────────────────────────────────────────
 
 function _classifyUrl(url) {
   if (!url) return { type: 'unknown', url, label: 'Unknown' };
-  if (url.includes('busycdn') || url.includes('instadl'))       return { type: 'instant',     url, label: 'Instant DL [10GBPS]' };
-  if (url.includes('r2.dev'))                                    return { type: 'r2',          url, label: 'Cloud Download [R2]' };
-  if (url.includes('/cloud/') || url.includes('/cflare/'))       return { type: 'cloud',       url, label: 'Fast Cloud / ZipDisk' };
-  if (url.includes('mxgserver') || url.includes('speed-dl'))     return { type: 'mgt',         url, label: 'Direct Server [MGT]' };
-  if (url.includes('pixeldrain'))                                 return { type: 'pixeldrain',  url, label: 'PixelDrain' };
-  if (url.includes('filesgram') || url.includes('t.me'))         return { type: 'telegram',    url, label: 'Telegram File' };
-  if (url.includes('gofile.io') || url.includes('goflix.sbs'))   return { type: 'gofile',      url, label: 'GoFile' };
-  if (url.includes('hubcloud'))                                   return { type: 'hubcloud',    url, label: 'HubCloud' };
-  if (url.includes('drive.google.com'))                          return { type: 'gdrive',      url, label: 'Google Drive' };
-  if (url.includes('mega.nz'))                                    return { type: 'mega',        url, label: 'Mega.nz' };
-  if (url.includes('mediafire'))                                  return { type: 'mediafire',   url, label: 'MediaFire' };
-  if (url.includes('buzzheavier'))                                return { type: 'buzzheavier', url, label: 'BuzzHeavier' };
-  if (url.includes('fuckingfast'))                                return { type: 'fuckingfast', url, label: 'FuckingFast' };
-  if (url.includes('terabox'))                                    return { type: 'terabox',     url, label: 'TeraBox' };
-  if (url.includes('1fichier'))                                   return { type: '1fichier',    url, label: '1Fichier' };
-  if (url.includes('1drv.ms') || url.includes('onedrive'))       return { type: 'onedrive',    url, label: 'OneDrive' };
-  if (url.includes('dropbox'))                                    return { type: 'dropbox',     url, label: 'Dropbox' };
+  if (url.includes('busycdn') || url.includes('instadl') ||
+      url.includes('foxcloud') || url.includes('workers.dev'))
+                                                              return { type: 'instant',     url, label: 'Instant DL [10GBPS]' };
+  if (url.includes('r2.dev'))                                 return { type: 'r2',          url, label: 'Cloud Download [R2]' };
+  if (url.includes('/cloud/') || url.includes('/cflare/'))    return { type: 'cloud',       url, label: 'Fast Cloud / ZipDisk' };
+  if (url.includes('mxgserver') || url.includes('speed-dl') ||
+      url.includes('indexserver'))                             return { type: 'mgt',         url, label: 'Direct Server [MGT]' };
+  if (url.includes('pixeldrain'))                             return { type: 'pixeldrain',  url, label: 'PixelDrain' };
+  if (url.includes('filesgram') || url.includes('t.me'))      return { type: 'telegram',    url, label: 'Telegram File' };
+  if (url.includes('gofile.io') || url.includes('goflix.sbs') ||
+      url.includes('multiup.php'))                            return { type: 'gofile',      url, label: 'GoFile' };
+  if (url.includes('hubcloud'))                               return { type: 'hubcloud',    url, label: 'HubCloud' };
+  if (url.includes('drive.google.com'))                       return { type: 'gdrive',      url, label: 'Google Drive' };
+  if (url.includes('mega.nz'))                                return { type: 'mega',        url, label: 'Mega.nz' };
+  if (url.includes('mediafire'))                              return { type: 'mediafire',   url, label: 'MediaFire' };
+  if (url.includes('buzzheavier'))                            return { type: 'buzzheavier', url, label: 'BuzzHeavier' };
+  if (url.includes('fuckingfast'))                            return { type: 'fuckingfast', url, label: 'FuckingFast' };
+  if (url.includes('terabox'))                                return { type: 'terabox',     url, label: 'TeraBox' };
+  if (url.includes('1fichier'))                               return { type: '1fichier',    url, label: '1Fichier' };
+  if (url.includes('1drv.ms') || url.includes('onedrive'))    return { type: 'onedrive',    url, label: 'OneDrive' };
+  if (url.includes('dropbox'))                                return { type: 'dropbox',     url, label: 'Dropbox' };
   return { type: 'direct', url, label: 'Direct Link' };
 }
 
