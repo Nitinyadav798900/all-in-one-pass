@@ -13,6 +13,7 @@ const SITE_FILES = [
   'voe.js',
   'pixeldrain.js',
   'gdflix.js',
+  'mcloud.js',
 ];
 
 class SiteRegistry {
