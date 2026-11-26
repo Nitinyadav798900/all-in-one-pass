@@ -9,7 +9,7 @@ class McloudSite extends BaseSite {
       id:      'mcloud',
       name:    'MCloud',
       version: '1.0.0',
-      domains: ['mcloud.to', 'mcloud.bz'],
+      domains: ['mcloud.to', 'mcloud.bz' 'mcloud.best'],
     });
   }
 
