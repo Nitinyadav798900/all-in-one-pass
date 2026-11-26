@@ -3,25 +3,16 @@
 const BaseSite          = require('../site-base');
 const { rawGet, sleep, globalJar } = require('../http');
 
-// ── CF bypass strategies ─────────────────────────────────────────────────────
-// Priority: 1) FlareSolverr  2) Puppeteer  3) rawGet with stolen cookies
-// Check which one your project has available.
-
-let puppeteer = null;
-try { puppeteer = require('puppeteer-extra'); } catch (_) {}
-
-let StealthPlugin = null;
-try { StealthPlugin = require('puppeteer-extra-plugin-stealth'); } catch (_) {}
-
-// FlareSolverr endpoint — set env or hardcode
-const FLARESOLVERR = process.env.FLARESOLVERR_URL || 'http://localhost:8191/v1';
+// ── Hardcoded CF clearance (rotate when it expires ~30min) ───────────────────
+const CF_CLEARANCE = process.env.MCLOUD_CF_CLEARANCE ||
+  'Ctog45rvOhDSLTZQUngTqrwuUoOyz0hrU3Ny1eseB9yrOXWbgW52uGNk3jQ0z3cc-ZYEpWAgfq4hC9vux3c6V3qugiXjjzx4Jzc-uSz3Bj1qRnbP1kxaWdJKHYrT3It6PgA7q8nJArhEXerbCfybgmeWSyNCQRQpUMuE4wCSTOTcG8pOBpc0cWNXP0LicGbJYXHRXJoDpGKYhvFjVCpKio1RCMkK21Kcjnt3mxqLXm5XHvuqd_H4SnE9h5mn503Px6-ilSayU2KIcnFTcnJKBOt-2MJalOwsesmd3W9s-QtjhtEWEFPnAuFbPp5-n5G7uSyarcEHxog6akacuc949wdtW7eRM8Au5b6g4_Ha1wKH4L5gnrPgwMslGS-MUbhIrfbpbhBlbtuMPZnTuPI';
 
 class MCloud extends BaseSite {
   constructor() {
     super();
     this.name    = 'MCloud';
     this.id      = 'mcloud';
-    this.version = '2.0.0';
+    this.version = '3.0.0';
     this.domains = ['mcloud.best'];
   }
 
@@ -34,7 +25,10 @@ class MCloud extends BaseSite {
 
   validate(html) {
     return {
-      valid : html.includes('card-header') || html.includes('Generate Download Link') || html.includes('mCloud'),
+      valid : html.includes('card-header') ||
+              html.includes('Generate Download Link') ||
+              html.includes('mCloud') ||
+              html.includes('list-group'),
       reason: 'Missing expected MCloud structure',
     };
   }
@@ -43,172 +37,97 @@ class MCloud extends BaseSite {
     const { id, host } = this.extract(url);
     const landingUrl   = `https://${this.domains[0]}/${id}`;
 
-    // ── Try FlareSolverr first (fastest, no browser spawn) ───────────────────
-    let html1, url1;
-    try {
-      ({ html: html1, url: url1 } = await _flaresolverr(landingUrl));
-      console.error('[mcloud] ✓ FlareSolverr succeeded');
-    } catch (e) {
-      console.error('[mcloud] FlareSolverr failed:', e.message);
+    // Inject CF cookies into globalJar before every request
+    _injectCF();
+
+    // ── Step 1: landing page ─────────────────────────────────────────────────
+    const r1 = await rawGet(landingUrl, {
+      referer : 'https://www.google.com/',
+      headers : _cfHeaders(landingUrl),
+    });
+
+    console.error(`[mcloud] landing → ${r1.status} (${r1.body.length}b) finalUrl=${r1.finalUrl}`);
+
+    if (r1.status !== 200 || r1.body.length < 300) {
+      console.error('[mcloud] body sample:', r1.body.slice(0, 600));
+      throw new Error(`MCloud: landing page failed — status=${r1.status} bytes=${r1.body.length}`);
     }
 
-    // ── Fallback: Puppeteer stealth ───────────────────────────────────────────
-    if (!html1 && puppeteer) {
-      try {
-        ({ html: html1, url: url1 } = await _puppeteer(landingUrl));
-        console.error('[mcloud] ✓ Puppeteer succeeded');
-      } catch (e) {
-        console.error('[mcloud] Puppeteer failed:', e.message);
-      }
-    }
-
-    if (!html1) throw new Error('MCloud: all CF bypass methods failed for ' + landingUrl);
+    const html1 = r1.body;
+    const url1  = r1.finalUrl;
 
     const v = this.validate(html1);
     if (!v.valid) {
-      console.error('[mcloud] unexpected html:\n', html1.slice(0, 1000));
+      console.error('[mcloud] unexpected html:', html1.slice(0, 1000));
       throw new Error('MCloud: ' + v.reason);
     }
 
-    // ── Extract token URL ────────────────────────────────────────────────────
+    // ── Step 2: extract token URL ────────────────────────────────────────────
     const tokenUrl = _extractTokenUrl(html1, host);
     if (!tokenUrl) {
       console.error('[mcloud] html1 for debug:\n', html1.slice(0, 3000));
-      throw new Error('MCloud: token URL not found in landing page');
+      throw new Error('MCloud: token URL not found');
     }
     console.error('[mcloud] token url:', tokenUrl);
 
-    // ── Fetch mirror page ─────────────────────────────────────────────────────
-    // Mirror page is same-origin, CF cookies from step 1 carry over
-    let html2, url2;
-    try {
-      ({ html: html2, url: url2 } = await _flaresolverr(tokenUrl, landingUrl));
-    } catch (_) {
-      if (puppeteer) {
-        ({ html: html2, url: url2 } = await _puppeteer(tokenUrl, landingUrl));
-      } else {
-        // Last resort: rawGet with globalJar (cookies from flaresolverr may help)
-        const r = await rawGet(tokenUrl, { referer: landingUrl });
-        html2 = r.body; url2 = r.finalUrl;
-      }
-    }
+    // ── Step 3: mirror page ──────────────────────────────────────────────────
+    _injectCF(); // re-inject before second request
+    const r2 = await rawGet(tokenUrl, {
+      referer : url1,
+      headers : _cfHeaders(tokenUrl, url1),
+    });
 
-    console.error('[mcloud] mirror page bytes:', html2.length);
+    console.error(`[mcloud] mirror → ${r2.status} (${r2.body.length}b)`);
 
-    const meta    = _parseMeta(html2);
-    const servers = _parseServers(html2);
+    const meta    = _parseMeta(r2.body);
+    const servers = _parseServers(r2.body);
 
     if (servers.length === 0) {
-      console.error('[mcloud] mirror html:\n', html2.slice(0, 3000));
+      console.error('[mcloud] mirror html:\n', r2.body.slice(0, 3000));
       throw new Error('MCloud: no download links found');
     }
 
-    return this._result(id, meta, servers, { final_page: url2 });
+    return this._result(id, meta, servers, { final_page: r2.finalUrl });
   }
 }
 
-// ── FlareSolverr ─────────────────────────────────────────────────────────────
-async function _flaresolverr(url, referer = '') {
-  const http = require('http');
-  const https = require('https');
-
-  const payload = JSON.stringify({
-    cmd       : 'request.get',
-    url,
-    maxTimeout: 60000,
-    ...(referer ? { headers: { Referer: referer } } : {}),
-  });
-
-  return new Promise((resolve, reject) => {
-    const parsed   = new URL(FLARESOLVERR);
-    const lib      = parsed.protocol === 'https:' ? https : http;
-    const req      = lib.request({
-      hostname : parsed.hostname,
-      port     : parsed.port || (parsed.protocol === 'https:' ? 443 : 80),
-      path     : parsed.pathname,
-      method   : 'POST',
-      headers  : {
-        'Content-Type'  : 'application/json',
-        'Content-Length': Buffer.byteLength(payload),
-      },
-    }, (res) => {
-      let body = '';
-      res.on('data', d => body += d);
-      res.on('end', () => {
-        try {
-          const j = JSON.parse(body);
-          if (j.status !== 'ok') return reject(new Error('FlareSolverr: ' + (j.message || j.status)));
-          const sol = j.solution;
-          // Inject cookies into globalJar so rawGet calls also benefit
-          if (sol.cookies) {
-            for (const c of sol.cookies) {
-              try { globalJar.set(c.name, c.value, { domain: c.domain || 'mcloud.best' }); } catch (_) {}
-            }
-          }
-          resolve({ html: sol.response, url: sol.url });
-        } catch (e) { reject(e); }
-      });
-    });
-    req.on('error', reject);
-    req.write(payload);
-    req.end();
-  });
-}
-
-// ── Puppeteer stealth ─────────────────────────────────────────────────────────
-async function _puppeteer(url, referer = '') {
-  if (!puppeteer) throw new Error('puppeteer-extra not installed');
-  if (StealthPlugin) puppeteer.use(StealthPlugin());
-
-  const browser = await puppeteer.launch({
-    headless : true,
-    args     : [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-blink-features=AutomationControlled',
-    ],
-  });
-
+// ── CF cookie inject ──────────────────────────────────────────────────────────
+function _injectCF() {
+  if (!CF_CLEARANCE) return;
   try {
-    const page = await browser.newPage();
-    await page.setExtraHTTPHeaders({ ...(referer ? { Referer: referer } : {}) });
-    await page.setUserAgent(
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
-    );
-
-    await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
-
-    // Wait for CF to clear (it injects a 5s JS challenge)
-    await sleep(6000);
-
-    // If still on CF challenge, wait more
-    const title = await page.title();
-    if (title.includes('Just a moment') || title.includes('Attention Required')) {
-      await sleep(8000);
-    }
-
-    const html    = await page.content();
-    const finalUrl = page.url();
-
-    // Steal cookies into globalJar
-    const cookies = await page.cookies();
-    for (const c of cookies) {
-      try { globalJar.set(c.name, c.value, { domain: c.domain }); } catch (_) {}
-    }
-
-    return { html, url: finalUrl };
-  } finally {
-    await browser.close();
-  }
+    globalJar.set('cf_clearance', CF_CLEARANCE, { domain: 'mcloud.best' });
+  } catch (_) {}
 }
 
-// ── Token extractor ───────────────────────────────────────────────────────────
+// ── Full browser headers that match CF expectations ───────────────────────────
+function _cfHeaders(url, referer = '') {
+  const h = {
+    'User-Agent':                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    'Accept':                    'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+    'Accept-Language':           'en-US,en;q=0.9',
+    'Accept-Encoding':           'gzip, deflate, br',
+    'Upgrade-Insecure-Requests': '1',
+    'Sec-Fetch-Dest':            'document',
+    'Sec-Fetch-Mode':            'navigate',
+    'Sec-Fetch-Site':            referer ? 'same-origin' : 'none',
+    'Sec-Fetch-User':            '?1',
+    'Cache-Control':             'max-age=0',
+    'sec-ch-ua':                 '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+    'sec-ch-ua-mobile':          '?0',
+    'sec-ch-ua-platform':        '"Windows"',
+    'Connection':                'keep-alive',
+  };
+  if (referer) h['Referer'] = referer;
+  return h;
+}
+
+// ── Token URL extractor ───────────────────────────────────────────────────────
 function _extractTokenUrl(html, fallbackHost) {
   const patterns = [
     /location\.assign\(["']([^"']+\?token=[^"']+)["']\)/i,
     /location\.href\s*=\s*["']([^"']+\?token=[^"']+)["']/i,
     /window\.location\s*=\s*["']([^"']+\?token=[^"']+)["']/i,
-    /["']([^"']*\/[a-zA-Z0-9_-]+\?token=[A-Za-z0-9+/=]{10,})["']/,
+    /["']([^"']*\/[a-zA-Z0-9_-]{6,}\?token=[A-Za-z0-9+/=]{10,})["']/,
   ];
   for (const p of patterns) {
     const m = html.match(p);
@@ -247,7 +166,7 @@ function _parseServers(html) {
   const r2Re = /href=["'](https:\/\/[a-z0-9-]+\.r2(?:\.dev|\.cloudflarestorage\.com)\/[^"']+)["']/gi;
   while ((m = r2Re.exec(html)) !== null) push('FSL Server', m[1], 'r2');
 
-  // Minute-rotated data-minute-base-url
+  // Minute-rotated
   const minBase = html.match(/data-minute-base-url=["'](https?:\/\/[^"']+)["']/i);
   if (minBase) {
     const fslUrl = minBase[1] + String(new Date().getUTCMinutes());
@@ -262,7 +181,7 @@ function _parseServers(html) {
   const pxlRe = /href=["'](https?:\/\/pixeldrain[^"']+)["']/gi;
   while ((m = pxlRe.exec(html)) !== null) push('PixelDrain Server', m[1], 'pixeldrain');
 
-  // Generic CDN fallback
+  // pub- R2 CDN
   const cdnRe = /href=["'](https?:\/\/pub-[a-z0-9]+\.r2\.dev\/[^"']+)["']/gi;
   while ((m = cdnRe.exec(html)) !== null) push('CDN Server', m[1], 'cdn');
 
