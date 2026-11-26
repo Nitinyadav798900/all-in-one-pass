@@ -257,7 +257,6 @@ app.get('/proxy', rateLimit(20), async (req, res) => {
     };
     if (cookie) headers['Cookie'] = cookie;
 
-    // pixeldrain session warming
     const isPd = url.includes('pixeldrain');
     if (isPd) {
       const fileId = url.match(/\/file\/([A-Za-z0-9]+)/)?.[1];
@@ -336,7 +335,6 @@ app.get('/debug-mc', rateLimit(10), async (req, res) => {
   const results = {};
 
   try {
-    // step 1: GET page
     const r    = await rawGet(url, {
       jar,
       headers: {
@@ -368,13 +366,11 @@ app.get('/debug-mc', rateLimit(10), async (req, res) => {
       cookies     : r.headers?.['set-cookie'],
     };
 
-    // find CSRF token
     const token = html.match(/(?:_token|csrf_token)\s*[=:]\s*["']([^"']+)["']/)?.[1]
                || html.match(/<input[^>]+name="_token"[^>]+value="([^"]+)"/)?.[1]
                || html.match(/meta.*csrf.*content="([^"]+)"/i)?.[1];
     results.csrf_token = token;
 
-    // step 2: POST with token
     if (token) {
       try {
         const postR = await rawPost(url, `_token=${token}`, {
@@ -406,7 +402,6 @@ app.get('/debug-mc', rateLimit(10), async (req, res) => {
       } catch(e) { results.post_error = e.message; }
     }
 
-    // step 3: try /download endpoint
     try {
       const id  = url.match(/\/view\/([a-zA-Z0-9_-]+)/)?.[1];
       const dlR = await rawGet(`${new URL(url).origin}/download/${id}`, {
@@ -427,7 +422,6 @@ app.get('/debug-mc', rateLimit(10), async (req, res) => {
       };
     } catch(e) { results.download_endpoint_error = e.message; }
 
-    // step 4: try JSON API endpoints
     const id = url.match(/\/view\/([a-zA-Z0-9_-]+)/)?.[1];
     const apiEndpoints = [
       `${new URL(url).origin}/api/file/${id}`,
@@ -532,10 +526,82 @@ app.post('/sites/:id/reload', requireMaster, (req, res) => {
   res.json(result);
 });
 
+// ══════════════════════════════════════════════════════════════════════════
+// SITE-SPECIFIC ROUTES  ← NEW
+// /hubcloud?url=  /gofile?url=  /voe?url=  etc
+// ══════════════════════════════════════════════════════════════════════════
+
+const SITE_ROUTES = [
+  'hubcloud',
+  'hubdrive',
+  'multicloud',
+  'drivehub',
+  'gofile',
+  'streamtape',
+  'voe',
+  'pixeldrain',
+  'gdflix',
+  'mcloud',
+  'driveseed',
+  'filepress',
+];
+
+for (const siteId of SITE_ROUTES) {
+  app.get(`/${siteId}`, rateLimit(60), async (req, res) => {
+    const { url, nocache } = req.query;
+    if (!url) {
+      return res.status(400).json({
+        success: false,
+        error  : `Missing ?url= parameter`,
+        example: `/${siteId}?url=https://your-link-here`,
+      });
+    }
+    try {
+      const result = await bypass(url, { skipCache: nocache === '1' });
+      res.json(result);
+    } catch (e) {
+      console.error(`[/${siteId}] ${e.message}`);
+      const code = e.message.includes('Invalid URL') ||
+                   e.message.includes('Unsupported') ||
+                   e.message.includes('not found') ? 400 : 502;
+      res.status(code).json({ success: false, error: e.message, url });
+    }
+  });
+
+  app.post(`/${siteId}`, rateLimit(60), async (req, res) => {
+    const url     = req.body?.url;
+    const nocache = req.body?.nocache;
+    if (!url) {
+      return res.status(400).json({
+        success: false,
+        error  : `Missing 'url' in request body`,
+        example: `POST /${siteId}  body: { "url": "https://your-link-here" }`,
+      });
+    }
+    try {
+      const result = await bypass(url, { skipCache: nocache === true || nocache === '1' });
+      res.json(result);
+    } catch (e) {
+      console.error(`[/${siteId}] ${e.message}`);
+      const code = e.message.includes('Invalid URL') ||
+                   e.message.includes('Unsupported') ||
+                   e.message.includes('not found') ? 400 : 502;
+      res.status(code).json({ success: false, error: e.message, url });
+    }
+  });
+}
+
+// ══════════════════════════════════════════════════════════════════════════
 // 404
+// ══════════════════════════════════════════════════════════════════════════
+
 app.use((req, res) => res.status(404).json({
   error    : 'Route not found',
-  endpoints: ['/bypass', '/batch', '/prefetch', '/sites', '/stats', '/health', '/info', '/formats', '/playlist', '/proxy'],
+  endpoints: [
+    '/bypass', '/batch', '/prefetch', '/sites', '/stats',
+    '/health', '/info', '/formats', '/playlist', '/proxy',
+    ...SITE_ROUTES.map(id => `/${id}`),
+  ],
 }));
 
 app.listen(PORT, () => {
