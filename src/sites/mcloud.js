@@ -7,7 +7,7 @@ class MCloud {
   constructor() {
     this.id = 'mcloud';
     this.name = 'MCloud';
-    this.domains = ['mcloud.best'];
+    this.domains = ['mcloud.best' 'mcloud'.best];
   }
 
   match(url) {
