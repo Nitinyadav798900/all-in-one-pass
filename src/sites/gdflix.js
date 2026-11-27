@@ -17,7 +17,7 @@ class GDFlix extends BaseSite {
       'new7.gdflix.io',  'new8.gdflix.io',  'new9.gdflix.io',
       'new10.gdflix.io', 'new11.gdflix.io', 'new12.gdflix.io',
       'new13.gdflix.io', 'new14.gdflix.io', 'new15.gdflix.io',
-      'gdflix.lol', 'gdflix.mom', 'gdflix.dad', 'gdflix.sbs', 'gdflix.vip',
+      'gdflix.lol', 'gdflix.mom', 'gdflix.dad', 'gdflix.sbs', 'gdflix.vip', 'gdflix.app',
     ];
   }
 
