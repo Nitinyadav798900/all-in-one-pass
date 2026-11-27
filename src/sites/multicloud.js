@@ -4,12 +4,28 @@ const BaseSite = require('../site-base');
 const { rawGet, rawPost, sleep, CookieJar } = require('../http');
 const https    = require('https');
 
+/**
+ * MultiCloudLinks — Full Chain Bypass
+ *
+ * Page pe jo bhi links hon:
+ *   HubCloud  → chain bypass → final direct links
+ *   HubDrive  → chain bypass → final direct links
+ *   GoFile    → API bypass   → final direct links
+ *   DriveHub  → chain bypass → final direct links
+ *   GDrive    → direct
+ *   PixelDrain→ direct
+ *   Mega      → direct
+ *   MediaFire → direct
+ *   R2/S3     → direct
+ *   TeraBox   → direct
+ *   1Fichier  → direct
+ */
 class MultiCloudLinks extends BaseSite {
   constructor() {
     super();
     this.name    = 'MultiCloudLinks';
     this.id      = 'multicloud';
-    this.version = '4.2.0';
+    this.version = '3.0.0';
     this.domains = [
       'multicloudlinks.com',
       'new1.multicloudlinks.com',
@@ -23,10 +39,15 @@ class MultiCloudLinks extends BaseSite {
   }
 
   extract(url) {
-    const u     = new URL(url);
-    const match = u.pathname.match(/\/(?:view|f|file|watch)\/([a-zA-Z0-9_-]+)/);
+    const u = new URL(url);
+    // /view/ID or /f/ID or /file/ID
+    const match = u.pathname.match(/\/(?:view|f|file)\/([a-zA-Z0-9_-]+)/);
     if (!match) throw new Error('MultiCloudLinks: URL se ID nahi mila');
-    return { id: match[1], host: u.hostname, query: u.search, full: url };
+    return {
+      id   : match[1],
+      host : u.hostname,
+      query: u.search,
+    };
   }
 
   validate(html) {
@@ -34,377 +55,139 @@ class MultiCloudLinks extends BaseSite {
   }
 
   async bypass(url) {
-    const { id, host, full } = this.extract(url);
+    const { id, host } = this.extract(url);
     const jar = new CookieJar();
 
-    const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/158.0.0.0 Safari/537.36 Edg/158.0.0.0';
+    // ── Stage 1: Page load ───────────────────────────────────────────
+    const page = await rawGet(url, {
+      referer: `https://${host}/`,
+      jar,
+    });
 
-    const BASE_HEADERS = {
-      'User-Agent'               : UA,
-      'Accept'                   : 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-      'Accept-Language'          : 'en-US,en;q=0.9',
-      'Accept-Encoding'          : 'gzip, deflate, br',
-      'Cache-Control'            : 'max-age=0',
-      'Upgrade-Insecure-Requests': '1',
-      'Sec-Fetch-Dest'           : 'document',
-      'Sec-Fetch-Mode'           : 'navigate',
-      'Sec-Fetch-Site'           : 'none',
-      'Sec-Fetch-User'           : '?1',
-      'Sec-CH-UA'                : '"Chromium";v="158", "Not.A/Brand";v="24", "Microsoft Edge";v="158"',
-      'Sec-CH-UA-Mobile'         : '?0',
-      'Sec-CH-UA-Platform'       : '"Windows"',
-      'Priority'                 : 'u=0, i',
-    };
+    if (page.status >= 400) throw new Error(`MultiCloudLinks: HTTP ${page.status}`);
 
-    // ── Stage 1: resolve signed URL ──────────────────────────────────
-    const hasToken  = full.includes('token=') && full.includes('exp=');
-    let signedUrl   = full;
+    const meta = _parseMeta(page.body, id);
+    console.log(`[multicloud] page loaded, length: ${page.body.length}`);
 
-    if (!hasToken) {
-      console.log(`[multicloud] no token -- resolving signed URL for id: ${id}`);
-      signedUrl = await _resolveSignedUrl(`https://${host}/view/${id}`, jar, BASE_HEADERS);
-      console.log(`[multicloud] signed URL: ${signedUrl}`);
-    }
-
-    // ── Stage 2: load signed page -- proxy first, direct fallback ────
-    const html = await _loadPage(signedUrl, jar, BASE_HEADERS, host);
-    const meta = _parseMeta(html, id);
-    console.log(`[multicloud] page loaded, length: ${html.length}`);
-
-    // ── Stage 3: extract server links ────────────────────────────────
-    const serverLinks = _extractAllLinks(html);
+    // ── Stage 2: Extract ALL server links from page ──────────────────
+    const serverLinks = _extractAllLinks(page.body);
     console.log(`[multicloud] found ${serverLinks.length} server links`);
     serverLinks.forEach(l => console.log(`  → [${l.type}] ${l.url.slice(0, 80)}`));
 
-    // ── Stage 4: API fallback if no links ────────────────────────────
     if (serverLinks.length === 0) {
-      console.warn('[multicloud] no links in HTML, trying API fetch');
-      const apiLinks = await _tryApiEndpoint(host, id, jar, BASE_HEADERS);
-      if (apiLinks.length > 0) serverLinks.push(...apiLinks);
-      else {
-        console.error('[multicloud] HTML snippet:', html.slice(0, 500));
-        throw new Error('MultiCloudLinks: koi link nahi mila page pe -- token expired ya invalid');
-      }
+      // Try POST endpoints
+      const postServers = await _tryPostEndpoints(url, host, id, jar);
+      if (postServers.length > 0) return this._result(id, meta, postServers);
+      console.error('[multicloud] HTML snippet:', page.body.slice(0, 2000));
+      throw new Error('MultiCloudLinks: koi link nahi mila page pe');
     }
 
-    // ── Stage 5: chain bypass ────────────────────────────────────────
+    // ── Stage 3: Chain bypass — har link ko process karo ────────────
     const finalServers = [];
 
     for (const link of serverLinks) {
       console.log(`[multicloud] processing [${link.type}]: ${link.url.slice(0, 60)}`);
       try {
-        const servers = await _processLink(link, jar, UA, BASE_HEADERS);
+        const servers = await _processLink(link);
         finalServers.push(...servers);
       } catch (e) {
         console.warn(`[multicloud] ${link.type} chain failed: ${e.message}`);
-        finalServers.push({ label: link.label, url: link.url, server: link.type, via: 'direct' });
+        // Chain fail ho toh original link add karo fallback mein
+        finalServers.push({
+          label : `${link.label} (direct)`,
+          url   : link.url,
+          server: link.type,
+          via   : 'direct-fallback',
+        });
       }
     }
 
     if (finalServers.length === 0) throw new Error('MultiCloudLinks: sab chains fail ho gayi');
 
     // Deduplicate
-    const seen   = new Set();
-    const unique = finalServers.filter(s => {
-      if (!s.url || seen.has(s.url)) return false;
-      seen.add(s.url); return true;
+    const seen    = new Set();
+    const unique  = finalServers.filter(s => {
+      if (seen.has(s.url)) return false;
+      seen.add(s.url);
+      return true;
     });
 
     return this._result(id, meta, unique);
   }
 }
 
-// ── Page load -- proxy try, direct fallback ───────────────────────────────
-async function _loadPage(url, jar, headers, host) {
-  const opts = {
-    jar,
-    headers        : { ...headers, 'Referer': `https://${host}/` },
-    followRedirects: true,
-    timeout        : 20000,
-  };
-
-  // attempt 1: proxy
-  try {
-    const r    = await rawGet(url, { ...opts, useProxy: true });
-    const body = _decodeHtml(r.body || '');
-    if (body.trim() !== 'Too many requests' && body.length > 100) {
-      console.log('[multicloud] loaded via proxy');
-      return body;
-    }
-    console.warn(`[multicloud] proxy returned: "${body.slice(0, 50)}" -- trying direct`);
-  } catch (e) {
-    console.warn(`[multicloud] proxy failed: ${e.message} -- trying direct`);
-  }
-
-  // small wait before direct
-  await sleep(1500);
-
-  // attempt 2: direct
-  try {
-    const r    = await rawGet(url, { ...opts, useProxy: false });
-    const body = _decodeHtml(r.body || '');
-    if (body.trim() !== 'Too many requests' && body.length > 100) {
-      console.log('[multicloud] loaded via direct');
-      return body;
-    }
-    console.warn(`[multicloud] direct also returned: "${body.slice(0, 50)}"`);
-    return body; // return anyway -- let caller handle
-  } catch (e) {
-    throw new Error(`MultiCloudLinks: page load failed -- ${e.message}`);
-  }
-}
-
-// ── Resolve signed URL ────────────────────────────────────────────────────
-async function _resolveSignedUrl(baseUrl, jar, headers) {
-  // try proxy first
-  let res;
-  try {
-    res = await rawGet(baseUrl, {
-      jar,
-      headers        : { ...headers, 'Referer': new URL(baseUrl).origin + '/' },
-      followRedirects: true,
-      timeout        : 15000,
-      useProxy       : true,
-    });
-  } catch {
-    res = await rawGet(baseUrl, {
-      jar,
-      headers        : { ...headers, 'Referer': new URL(baseUrl).origin + '/' },
-      followRedirects: true,
-      timeout        : 15000,
-      useProxy       : false,
-    });
-  }
-
-  const finalUrl = res.finalUrl || baseUrl;
-  if (finalUrl.includes('token=') && finalUrl.includes('exp=')) return finalUrl;
-
-  const html = _decodeHtml(res.body || '');
-
-  const metaRefresh = html.match(/<meta[^>]+http-equiv=["']refresh["'][^>]+content=["']\d+;\s*url=([^"']+)["']/i)?.[1];
-  if (metaRefresh && metaRefresh.includes('token=')) return metaRefresh;
-
-  const windowLoc = html.match(/window\.location(?:\.href)?\s*=\s*["'](https?:\/\/[^"']+token=[^"']+)["']/i)?.[1];
-  if (windowLoc) return windowLoc;
-
-  return finalUrl;
-}
-
-// ── API endpoint fallback ─────────────────────────────────────────────────
-async function _tryApiEndpoint(host, id, jar, headers) {
-  const endpoints = [
-    `https://${host}/api/links/${id}`,
-    `https://${host}/api/file/${id}`,
-    `https://${host}/api/get/${id}`,
-  ];
-
-  for (const ep of endpoints) {
-    try {
-      const res = await rawGet(ep, {
-        jar,
-        headers: {
-          ...headers,
-          'Accept'            : 'application/json, text/plain, */*',
-          'Referer'           : `https://${host}/`,
-          'X-Requested-With'  : 'XMLHttpRequest',
-        },
-        timeout  : 10000,
-        useProxy : true,
-      });
-
-      if (res.status !== 200) continue;
-      const json = JSON.parse(res.body);
-      const arr  = json.links || json.data?.links || json.servers || json.data || [];
-      const links = [];
-
-      if (Array.isArray(arr)) {
-        for (const item of arr) {
-          const url = item.url || item.link || item.href;
-          if (url?.startsWith('http')) {
-            links.push({ type: _guessType(url), url, label: item.name || item.label || 'Server' });
-          }
-        }
-      }
-
-      if (links.length > 0) {
-        console.log(`[multicloud] API ${ep} returned ${links.length} links`);
-        return links;
-      }
-    } catch (e) {
-      console.warn(`[multicloud] API ${ep} failed: ${e.message}`);
-    }
-  }
-  return [];
-}
-
-function _guessType(url) {
-  if (url.includes('hubcloud'))      return 'hubcloud';
-  if (url.includes('hubdrive'))      return 'hubdrive';
-  if (url.includes('gofile'))        return 'gofile';
-  if (url.includes('multidownload')) return 'multidownload';
-  if (url.includes('reqinstant'))    return 'reqinstant';
-  if (url.includes('pixeldrain'))    return 'pixeldrain';
-  if (url.includes('drive.google'))  return 'gdrive';
-  if (url.includes('mega.nz'))       return 'mega';
-  if (url.includes('mediafire'))     return 'mediafire';
-  if (url.includes('gdbazar'))       return 'gdbazar';
-  if (url.includes('fuckingfast') || url.includes('buzzheavier')) return 'buzz';
-  return 'direct';
-}
-
-// ── HTML entity decode ────────────────────────────────────────────────────
-function _decodeHtml(html) {
-  return html
-    .replace(/&amp;/g,  '&')
-    .replace(/&lt;/g,   '<')
-    .replace(/&gt;/g,   '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g,  "'");
-}
-
 // ── Process each link type ────────────────────────────────────────────────
-async function _processLink(link, jar, UA, h) {
+async function _processLink(link) {
   switch (link.type) {
-    case 'hubcloud':      return _chainHubCloud(link.url, jar, UA);
-    case 'hubdrive':      return _chainHubDrive(link.url, jar, UA, h);
-    case 'gofile':        return _chainGoFile(link.url);
-    case 'drivehub':      return _chainDriveHub(link.url, jar, UA, h);
-    case 'multicloud':    return _chainMultiCloud(link.url, UA, h);
-    case 'reqinstant':    return _chainReqInstant(link.url, jar, UA, h);
-    case 'multidownload': return _chainMultiDownload(link.url, jar, UA, h);
-    case 'gdbazar':       return _chainGdbazar(link.url, jar, UA, h);
-    case 'viking':        return _chainViking(link.url, jar, UA, h);
-    case 'pixeldrain_mc': return _chainPixeldrainMC(link.url, jar, UA, h);
-    case 'filebee':       return _chainFilebee(link.url, jar, UA, h);
-    case 'gdflix':        return _chainGdflix(link.url, jar, UA, h);
+    case 'hubcloud':   return _chainHubCloud(link.url);
+    case 'hubdrive':   return _chainHubDrive(link.url);
+    case 'gofile':     return _chainGoFile(link.url);
+    case 'drivehub':   return _chainDriveHub(link.url);
+    case 'multicloud': return _chainMultiCloud(link.url); // nested multicloud
     default:
-      return [{ label: link.label, url: link.url, server: link.type, via: 'direct' }];
+      // Direct links — no chain needed
+      return [{
+        label : link.label,
+        url   : link.url,
+        server: link.type,
+        via   : 'direct',
+      }];
   }
-}
-
-// ── reqinstant chain ──────────────────────────────────────────────────────
-async function _chainReqInstant(url, jar, UA, h) {
-  const res      = await rawGet(url, { jar, headers: { ...h, 'Referer': 'https://multicloudlinks.com/' }, followRedirects: true, timeout: 15000 });
-  const finalUrl = res.finalUrl || url;
-  const html     = _decodeHtml(res.body || '');
-
-  if (finalUrl !== url && (finalUrl.includes('.mp4') || finalUrl.includes('download') || !finalUrl.includes('reqinstant')))
-    return [{ label: 'Instant Server', url: finalUrl, server: 'instant', via: 'reqinstant' }];
-
-  const links = _extractAllLinks(html);
-  if (links.length > 0) {
-    const servers = [];
-    for (const l of links) {
-      if (['reqinstant','multicloud'].includes(l.type)) continue;
-      try { servers.push(...await _processLink(l, jar, UA, h)); }
-      catch { servers.push({ label: l.label, url: l.url, server: l.type, via: 'reqinstant-direct' }); }
-    }
-    if (servers.length > 0) return servers;
-  }
-  return [{ label: 'Instant Server', url, server: 'instant', via: 'reqinstant-fallback' }];
-}
-
-// ── multidownload chain ───────────────────────────────────────────────────
-async function _chainMultiDownload(url, jar, UA, h) {
-  const res      = await rawGet(url, { jar, headers: { ...h, 'Referer': 'https://multicloudlinks.com/' }, followRedirects: true, timeout: 15000 });
-  const finalUrl = res.finalUrl || url;
-  if (finalUrl !== url && !finalUrl.includes('multidownload'))
-    return [{ label: 'Turbo Download (R2)', url: finalUrl, server: 'r2', via: 'multidownload' }];
-  const html  = _decodeHtml(res.body || '');
-  const links = _extractAllLinks(html);
-  if (links.length > 0) return links.map(l => ({ label: l.label, url: l.url, server: l.type, via: 'multidownload-page' }));
-  return [{ label: 'Turbo Download (R2)', url, server: 'r2', via: 'multidownload-direct' }];
-}
-
-// ── gdbazar chain ─────────────────────────────────────────────────────────
-async function _chainGdbazar(url, jar, UA, h) {
-  const res    = await rawGet(url, { jar, headers: { ...h, 'Referer': 'https://multicloudlinks.com/' }, followRedirects: true, timeout: 15000 });
-  const html   = _decodeHtml(res.body || '');
-  const links  = _extractAllLinks(html);
-  const direct = links.filter(l => ['r2','gdrive','pixeldrain','mega','mediafire','direct'].includes(l.type));
-  if (direct.length > 0) return direct.map(l => ({ ...l, via: 'gdbazar' }));
-  if (links.length > 0)  return links.map(l => ({ ...l, via: 'gdbazar' }));
-  return [{ label: 'GDBazar', url, server: 'gdbazar', via: 'direct' }];
-}
-
-// ── viking chain ──────────────────────────────────────────────────────────
-async function _chainViking(url, jar, UA, h) {
-  const res      = await rawGet(url, { jar, headers: { ...h, 'Referer': 'https://multicloudlinks.com/' }, followRedirects: true, timeout: 15000 });
-  const finalUrl = res.finalUrl || url;
-  if (finalUrl !== url && !finalUrl.includes('viking'))
-    return [{ label: 'Viking Server', url: finalUrl, server: 'cdn', via: 'viking' }];
-  const html  = _decodeHtml(res.body || '');
-  const links = _extractAllLinks(html);
-  if (links.length > 0) return links.map(l => ({ ...l, via: 'viking' }));
-  return [{ label: 'Viking Server', url, server: 'viking', via: 'direct' }];
-}
-
-// ── pixeldra.multicloudlinks chain ───────────────────────────────────────
-async function _chainPixeldrainMC(url, jar, UA, h) {
-  const res      = await rawGet(url, { jar, headers: { ...h, 'Referer': 'https://multicloudlinks.com/' }, followRedirects: true, timeout: 15000 });
-  const finalUrl = res.finalUrl || url;
-  if (finalUrl !== url)
-    return [{ label: 'PixelDrain', url: finalUrl, server: 'pixeldrain', via: 'pixeldrain-mc' }];
-  const html  = _decodeHtml(res.body || '');
-  const links = _extractAllLinks(html);
-  if (links.length > 0) return links.map(l => ({ ...l, via: 'pixeldrain-mc' }));
-  return [{ label: 'PixelDrain', url, server: 'pixeldrain', via: 'direct' }];
-}
-
-// ── filebee chain ─────────────────────────────────────────────────────────
-async function _chainFilebee(url, jar, UA, h) {
-  const res      = await rawGet(url, { jar, headers: { ...h, 'Referer': 'https://multicloudlinks.com/' }, followRedirects: true, timeout: 15000 });
-  const finalUrl = res.finalUrl || url;
-  if (finalUrl !== url && !finalUrl.includes('filebee'))
-    return [{ label: 'FileBee CDN', url: finalUrl, server: 'cdn', via: 'filebee' }];
-  const html   = _decodeHtml(res.body || '');
-  const dlLink = html.match(/href=["'](https?:\/\/[^"']*(?:download|\.mp4|\.mkv|\.zip)[^"']*)["']/i)?.[1];
-  if (dlLink) return [{ label: 'FileBee CDN', url: dlLink, server: 'cdn', via: 'filebee' }];
-  return [{ label: 'FileBee', url, server: 'filebee', via: 'direct' }];
-}
-
-// ── gdflix chain ──────────────────────────────────────────────────────────
-async function _chainGdflix(url, jar, UA, h) {
-  const res      = await rawGet(url, { jar, headers: { ...h, 'Referer': 'https://multicloudlinks.com/' }, followRedirects: true, timeout: 15000 });
-  const finalUrl = res.finalUrl || url;
-  if (finalUrl !== url && !finalUrl.includes('gdflix'))
-    return [{ label: 'GDFlix CDN', url: finalUrl, server: 'cdn', via: 'gdflix' }];
-  const html  = _decodeHtml(res.body || '');
-  const links = _extractAllLinks(html);
-  if (links.length > 0) return links.map(l => ({ ...l, via: 'gdflix' }));
-  return [{ label: 'GDFlix', url, server: 'gdflix', via: 'direct' }];
 }
 
 // ── HubCloud chain ────────────────────────────────────────────────────────
-async function _chainHubCloud(url, jar, UA) {
-  let id = null;
-  for (const p of [/\/(?:drive|d)\/([a-zA-Z0-9_-]+)/, /\/file\/([a-zA-Z0-9_-]+)/]) {
-    const m = url.match(p); if (m) { id = m[1]; break; }
-  }
-  if (!id) throw new Error('HubCloud: ID not found');
+async function _chainHubCloud(url) {
+  const { rawGet, sleep, globalJar } = require('../http');
 
-  const HOSTS = ['hubcloud.mov','hubcloud.cx','hubcloud.in','hubcloud.pw','hubcloud.fans'];
+  // Normalize — different hubcloud URL formats
+  let id = null;
+  const patterns = [
+    /\/(?:drive|d)\/([a-zA-Z0-9_-]+)/,
+    /\/file\/([a-zA-Z0-9_-]+)/,
+  ];
+  for (const p of patterns) {
+    const m = url.match(p);
+    if (m) { id = m[1]; break; }
+  }
+  if (!id) throw new Error('HubCloud: ID not found in ' + url);
+
+  const HOSTS = ['hubcloud.mov', 'hubcloud.cx', 'hubcloud.in', 'hubcloud.pw', 'hubcloud.fans'];
   let html1, url1;
+
   for (const h of HOSTS) {
     try {
-      const r = await rawGet(`https://${h}/drive/${id}`, { headers: { 'User-Agent': UA, 'Referer': 'https://www.google.com/' }, timeout: 10000 });
-      if (r.status === 200 && r.body.length > 500) { html1 = r.body; url1 = r.finalUrl; break; }
-    } catch {}
+      const r = await rawGet(`https://${h}/drive/${id}`, { referer: 'https://www.google.com/' });
+      if (r.status === 200 && r.body.length > 500) {
+        html1 = r.body; url1 = r.finalUrl;
+        console.log(`[hubcloud-chain] got page from ${h}`);
+        break;
+      }
+    } catch (_) {}
   }
+
   if (!html1) throw new Error('HubCloud chain: page not reachable');
 
-  const tokenUrl = html1.match(/href=["'](https:\/\/gamerxyt\.com[^"']+)["']/i)?.[1]
-                || html1.match(/(https?:\/\/gamerxyt\.com\/[^\s"'<>]+)/i)?.[1];
+  // Token extract
+  const tokenPatterns = [
+    /href=["'](https:\/\/gamerxyt\.com[^"']+)["']/i,
+    /var\s+url\s*=\s*["'](https?:\/\/[^"']*gamerxyt[^"']+)["']/,
+    /(https?:\/\/gamerxyt\.com\/[^\s"'<>]+)/i,
+  ];
+  let tokenUrl = null;
+  for (const p of tokenPatterns) {
+    const m = html1.match(p);
+    if (m) { tokenUrl = m[1]; break; }
+  }
   if (!tokenUrl) throw new Error('HubCloud chain: token not found');
 
-  const { globalJar } = require('../http');
   globalJar.set('xla', 's4t');
   globalJar.set('xyt', '1');
   await sleep(2600);
 
-  const r2      = await rawGet(tokenUrl, { headers: { 'User-Agent': UA, 'Referer': url1 } });
+  const r2      = await rawGet(tokenUrl, { referer: url1 });
   const servers = _parseHubCloudFinalPage(r2.body);
   if (servers.length === 0) throw new Error('HubCloud chain: no links in final page');
+
   return servers.map(s => ({ ...s, label: `[HC] ${s.label}`, via: 'hubcloud' }));
 }
 
@@ -416,31 +199,46 @@ function _parseHubCloudFinalPage(html) {
   };
   let m;
   const r2Re = /href=["'](https:\/\/[a-z0-9]+\.r2\.cloudflarestorage\.com\/[^"']+)["']/gi;
-  while ((m = r2Re.exec(html))  !== null) push('Direct Server', m[1], 'r2');
+  while ((m = r2Re.exec(html)) !== null) push('Direct Server', m[1], 'r2');
   const gpRe = /href=["'](https:\/\/gpdl\.hubcloud[^"']+)["']/gi;
-  while ((m = gpRe.exec(html))  !== null) push('10Gbps Server', m[1], '10gbps');
+  while ((m = gpRe.exec(html)) !== null) push('10Gbps Server', m[1], '10gbps');
   const pxJs = html.match(/var\s+pxl\s*=\s*["'](https?:\/\/pixeldrain[^"']+)["']/);
   if (pxJs) push('PixelDrain', pxJs[1], 'pixeldrain');
   const pxRe = /href=["'](https?:\/\/pixeldrain[^"']+)["']/gi;
-  while ((m = pxRe.exec(html))  !== null) push('PixelDrain', m[1], 'pixeldrain');
+  while ((m = pxRe.exec(html)) !== null) push('PixelDrain', m[1], 'pixeldrain');
   const ffRe = /href=["'](https:\/\/fuckingfast\.net\/[^"']+)["']/gi;
-  while ((m = ffRe.exec(html))  !== null) push('Buzz Server', m[1], 'buzz');
+  while ((m = ffRe.exec(html)) !== null) push('Buzz Server', m[1], 'buzz');
+  const tgRe = /href=["'](https:\/\/hubcloud\.[a-z]+\/tg\/go[^"']+)["']/gi;
+  while ((m = tgRe.exec(html)) !== null) push('Telegram', m[1], 'telegram');
   return links;
 }
 
 // ── HubDrive chain ────────────────────────────────────────────────────────
-async function _chainHubDrive(url, jar, UA, h) {
-  const page    = await rawGet(url, { headers: { ...h, 'Referer': new URL(url).origin + '/' }, jar, timeout: 15000, followRedirects: true });
-  const html    = _decodeHtml(page.body || '');
-  const links   = _extractAllLinks(html);
-  const servers = [];
-  for (const link of links) {
-    try { servers.push(...(await _processLink(link, jar, UA, h)).map(x => ({ ...x, via: `hubdrive→${link.type}` }))); }
-    catch { servers.push({ label: link.label, url: link.url, server: link.type, via: 'hubdrive-direct' }); }
+async function _chainHubDrive(url) {
+  const { rawGet, rawPost, sleep, CookieJar } = require('../http');
+  const jar  = new CookieJar();
+  const page = await rawGet(url, { referer: new URL(url).origin + '/', jar });
+  if (page.status >= 400) throw new Error(`HubDrive chain: HTTP ${page.status}`);
+
+  // Check for HubCloud links inside HubDrive page
+  const innerLinks = _extractAllLinks(page.body);
+  const servers    = [];
+
+  for (const link of innerLinks) {
+    try {
+      const s = await _processLink(link);
+      servers.push(...s.map(x => ({ ...x, label: `[HD→${link.type.toUpperCase()}] ${x.label}`, via: `hubdrive→${link.type}` })));
+    } catch (e) {
+      servers.push({ label: link.label, url: link.url, server: link.type, via: 'hubdrive-direct' });
+    }
   }
+
   if (servers.length > 0) return servers;
-  const direct = _parseDirectLinks(html);
+
+  // Direct links se try karo
+  const direct = _parseDirectLinks(page.body);
   if (direct.length > 0) return direct.map(s => ({ ...s, via: 'hubdrive' }));
+
   throw new Error('HubDrive chain: no links found');
 }
 
@@ -449,23 +247,37 @@ async function _chainGoFile(url) {
   const id = url.match(/\/d\/([a-zA-Z0-9]+)/)?.[1];
   if (!id) throw new Error('GoFile chain: ID not found');
 
+  // Guest token
   const tokenRaw = await new Promise((resolve, reject) => {
     const req = https.request({
       hostname: 'api.gofile.io', path: '/accounts', method: 'POST',
-      headers : { 'Content-Type': 'application/json', 'Content-Length': '2', 'Origin': 'https://gofile.io', 'Referer': 'https://gofile.io/' },
-      timeout : 12000,
-    }, (res) => { let raw = ''; res.on('data', c => raw += c); res.on('end', () => resolve(raw)); });
+      headers: {
+        'Content-Type'  : 'application/json',
+        'Content-Length': '2',
+        'Origin'        : 'https://gofile.io',
+        'Referer'       : 'https://gofile.io/',
+      },
+      timeout: 12000,
+    }, (res) => {
+      let raw = '';
+      res.on('data', c => raw += c);
+      res.on('end',  () => resolve(raw));
+    });
     req.on('error', reject);
-    req.write('{}'); req.end();
+    req.write('{}');
+    req.end();
   });
 
   const tokenJson = JSON.parse(tokenRaw);
   if (tokenJson.status !== 'ok') throw new Error('GoFile chain: token failed');
   const token = tokenJson.data.token;
 
-  const r    = await rawGet(`https://api.gofile.io/contents/${id}?wt=4fd6sg89d7s6&cache=true&token=${token}`, {
-    headers: { 'Referer': 'https://gofile.io/', 'Accept': 'application/json' },
-  });
+  // Content
+  const { rawGet } = require('../http');
+  const r    = await rawGet(
+    `https://api.gofile.io/contents/${id}?wt=4fd6sg89d7s6&cache=true&token=${token}`,
+    { referer: 'https://gofile.io/', headers: { Accept: 'application/json' } }
+  );
   const json = JSON.parse(r.body);
   if (json.status !== 'ok') throw new Error(`GoFile chain: ${json.status}`);
 
@@ -474,91 +286,190 @@ async function _chainGoFile(url) {
   for (const child of children) {
     if (child.type !== 'file') continue;
     const dlUrl = child.link || child.directLink;
-    if (dlUrl) servers.push({ label: `[GF] ${child.name || 'GoFile CDN'}`, url: dlUrl, server: 'gofile', size: child.size ? _fmtSize(child.size) : undefined, via: 'gofile' });
+    if (dlUrl) servers.push({
+      label : `[GF] ${child.name || 'GoFile CDN'}`,
+      url   : dlUrl,
+      server: 'gofile',
+      size  : child.size ? _fmtSize(child.size) : undefined,
+      via   : 'gofile',
+    });
   }
   if (servers.length === 0) throw new Error('GoFile chain: no files found');
   return servers;
 }
 
 // ── DriveHub chain ────────────────────────────────────────────────────────
-async function _chainDriveHub(url, jar, UA, h) {
-  const page   = await rawGet(url, { headers: { ...h, 'Referer': new URL(url).origin + '/' }, jar, timeout: 15000, followRedirects: true });
-  const html   = _decodeHtml(page.body || '');
-  const direct = _parseDirectLinks(html);
+async function _chainDriveHub(url) {
+  const { rawGet, CookieJar } = require('../http');
+  const jar  = new CookieJar();
+  const page = await rawGet(url, { referer: new URL(url).origin + '/', jar });
+  const direct = _parseDirectLinks(page.body);
   if (direct.length > 0) return direct.map(s => ({ ...s, via: 'drivehub' }));
   throw new Error('DriveHub chain: no links found');
 }
 
 // ── Nested MultiCloud chain ───────────────────────────────────────────────
-async function _chainMultiCloud(url, UA, h) {
+async function _chainMultiCloud(url) {
+  const { rawGet, CookieJar } = require('../http');
   const jar  = new CookieJar();
-  const page = await rawGet(url, { headers: { ...h, 'Referer': url }, jar, followRedirects: true, timeout: 15000 });
-  const html  = _decodeHtml(page.body || '');
-  const links = _extractAllLinks(html);
+  const page = await rawGet(url, { referer: url });
+  const links = _extractAllLinks(page.body);
   const servers = [];
   for (const link of links) {
-    if (link.type === 'multicloud') continue;
-    try { servers.push(...await _processLink(link, jar, UA, h)); }
-    catch { servers.push({ label: link.label, url: link.url, server: link.type, via: 'multicloud-direct' }); }
+    if (link.type === 'multicloud') continue; // prevent infinite loop
+    try {
+      const s = await _processLink(link);
+      servers.push(...s);
+    } catch (_) {
+      servers.push({ label: link.label, url: link.url, server: link.type, via: 'multicloud-direct' });
+    }
   }
   return servers;
 }
 
-// ── Extract ALL link types from HTML ──────────────────────────────────────
+// ── Extract ALL link types from any HTML ──────────────────────────────────
 function _extractAllLinks(html) {
-  const links = [], seen = new Set();
-  const push  = (type, url, label) => {
+  const links = [];
+  const seen  = new Set();
+
+  const push = (type, url, label) => {
     if (!url || !url.startsWith('http') || seen.has(url)) return;
-    seen.add(url); links.push({ type, url, label });
+    seen.add(url);
+    links.push({ type, url, label });
   };
+
   let m;
 
-  const patterns = [
-    [/href=["'](https?:\/\/[a-z0-9]+\.multidownload\.click\/[^"']+)["']/gi,                             'multidownload',  'Turbo Download (R2)'],
-    [/href=["'](https?:\/\/reqinstant\.multicloudlinks\.com\/[^"']+)["']/gi,                             'reqinstant',     'Instant Server'],
-    [/href=["'](https?:\/\/viking\.multicloudlinks\.com\/[^"']+)["']/gi,                                 'viking',         'Viking Server'],
-    [/href=["'](https?:\/\/pixeldra\.multicloudlinks\.com\/[^"']+)["']/gi,                               'pixeldrain_mc',  'PixelDrain'],
-    [/href=["'](https?:\/\/gdbazar\.com\/[^"']+)["']/gi,                                                 'gdbazar',        'GDBazar'],
-    [/href=["'](https?:\/\/filebee\.live\/[^"']+)["']/gi,                                                'filebee',        'FileBee'],
-    [/href=["'](https?:\/\/gdflix\.[^"']+)["']/gi,                                                       'gdflix',         'GDFlix'],
-    [/href=["'](https?:\/\/hubcloud\.[a-z]+\/(?:drive|d|file)\/[a-zA-Z0-9_-]+)["']/gi,                  'hubcloud',       'HubCloud Server'],
-    [/href=["'](https?:\/\/hubdrive\.[a-z]+\/file\/[a-zA-Z0-9_-]+)["']/gi,                              'hubdrive',       'HubDrive Server'],
-    [/href=["'](https?:\/\/gofile\.io\/d\/[a-zA-Z0-9]+)["']/gi,                                         'gofile',         'GoFile Server'],
-    [/href=["'](https?:\/\/[^"']*drivehub\.[a-z]+\/file\/[a-zA-Z0-9_-]+)["']/gi,                       'drivehub',       'DriveHub Server'],
-    [/href=["'](https?:\/\/[^"']*multicloudlinks[^"']+\/(?:view|f|file)\/[a-zA-Z0-9_-]+[^"']*)["']/gi, 'multicloud',     'MultiCloud Server'],
-    [/href=["'](https?:\/\/drive\.google\.com\/[^"']+)["']/gi,                                           'gdrive',         'Google Drive'],
-    [/href=["'](https?:\/\/pixeldrain[^"']+)["']/gi,                                                     'pixeldrain',     'PixelDrain'],
-    [/href=["'](https?:\/\/mega\.nz\/[^"']+)["']/gi,                                                     'mega',           'Mega'],
-    [/href=["'](https?:\/\/[^"']*mediafire[^"']+)["']/gi,                                                'mediafire',      'MediaFire'],
-    [/href=["'](https?:\/\/[^"']*\.r2\.cloudflarestorage[^"']+)["']/gi,                                 'r2',             'Direct Server'],
-    [/href=["'](https?:\/\/fuckingfast\.net\/[^"']+)["']/gi,                                             'buzz',           'Buzz Server'],
-    [/href=["'](https?:\/\/[^"']*buzzheavier[^"']+)["']/gi,                                              'buzzheavier',    'BuzzHeavier'],
-    [/href=["'](https?:\/\/[^"']*terabox[^"']+)["']/gi,                                                  'terabox',        'TeraBox'],
-    [/href=["'](https?:\/\/1fichier\.com\/[^"']+)["']/gi,                                                '1fichier',       '1Fichier'],
-    [/href=["'](https?:\/\/1drv\.ms\/[^"']+|https?:\/\/onedrive\.live[^"']+)["']/gi,                    'onedrive',       'OneDrive'],
-  ];
+  // HubCloud
+  const hcRe = /href=["'](https?:\/\/hubcloud\.[a-z]+\/(?:drive|d|file)\/[a-zA-Z0-9_-]+)["']/gi;
+  while ((m = hcRe.exec(html)) !== null) push('hubcloud', m[1], 'HubCloud Server');
 
-  for (const [re, type, label] of patterns) {
-    re.lastIndex = 0;
-    while ((m = re.exec(html)) !== null) push(type, m[1], label);
-  }
+  // HubDrive
+  const hdRe = /href=["'](https?:\/\/hubdrive\.[a-z]+\/file\/[a-zA-Z0-9_-]+)["']/gi;
+  while ((m = hdRe.exec(html)) !== null) push('hubdrive', m[1], 'HubDrive Server');
+
+  // GoFile
+  const gfRe = /href=["'](https?:\/\/gofile\.io\/d\/[a-zA-Z0-9]+)["']/gi;
+  while ((m = gfRe.exec(html)) !== null) push('gofile', m[1], 'GoFile Server');
+
+  // DriveHub
+  const dhRe = /href=["'](https?:\/\/[^"']*drivehub\.[a-z]+\/file\/[a-zA-Z0-9_-]+)["']/gi;
+  while ((m = dhRe.exec(html)) !== null) push('drivehub', m[1], 'DriveHub Server');
+
+  // Nested MultiCloud
+  const mcRe = /href=["'](https?:\/\/[^"']*multicloudlinks[^"']+\/(?:view|f|file)\/[a-zA-Z0-9_-]+[^"']*)["']/gi;
+  while ((m = mcRe.exec(html)) !== null) push('multicloud', m[1], 'MultiCloud Server');
+
+  // Google Drive
+  const gdRe = /href=["'](https?:\/\/drive\.google\.com\/[^"']+)["']/gi;
+  while ((m = gdRe.exec(html)) !== null) push('gdrive', m[1], 'Google Drive');
+
+  // PixelDrain
+  const pxRe = /href=["'](https?:\/\/pixeldrain[^"']+)["']/gi;
+  while ((m = pxRe.exec(html)) !== null) push('pixeldrain', m[1], 'PixelDrain');
+
+  // Mega
+  const mgRe = /href=["'](https?:\/\/mega\.nz\/[^"']+)["']/gi;
+  while ((m = mgRe.exec(html)) !== null) push('mega', m[1], 'Mega');
+
+  // MediaFire
+  const mfRe = /href=["'](https?:\/\/[^"']*mediafire[^"']+)["']/gi;
+  while ((m = mfRe.exec(html)) !== null) push('mediafire', m[1], 'MediaFire');
+
+  // R2 / S3 direct
+  const r2Re = /href=["'](https?:\/\/[^"']*\.r2\.cloudflarestorage[^"']+)["']/gi;
+  while ((m = r2Re.exec(html)) !== null) push('r2', m[1], 'Direct Server');
+
+  // FuckingFast
+  const ffRe = /href=["'](https?:\/\/fuckingfast\.net\/[^"']+)["']/gi;
+  while ((m = ffRe.exec(html)) !== null) push('buzz', m[1], 'Buzz Server');
+
+  // TeraBox
+  const tbRe = /href=["'](https?:\/\/[^"']*terabox[^"']+)["']/gi;
+  while ((m = tbRe.exec(html)) !== null) push('terabox', m[1], 'TeraBox');
+
+  // 1Fichier
+  const ofRe = /href=["'](https?:\/\/1fichier\.com\/[^"']+)["']/gi;
+  while ((m = ofRe.exec(html)) !== null) push('1fichier', m[1], '1Fichier');
+
+  // OneDrive
+  const odRe = /href=["'](https?:\/\/1drv\.ms\/[^"']+|https?:\/\/onedrive\.live[^"']+)["']/gi;
+  while ((m = odRe.exec(html)) !== null) push('onedrive', m[1], 'OneDrive');
+
+  // Buzzheavier / other direct CDN links
+  const buzzRe = /href=["'](https?:\/\/[^"']*buzzheavier[^"']+)["']/gi;
+  while ((m = buzzRe.exec(html)) !== null) push('buzzheavier', m[1], 'BuzzHeavier');
 
   return links;
 }
 
 function _parseDirectLinks(html) {
-  return _extractAllLinks(html)
-    .filter(l => ['gdrive','pixeldrain','mega','mediafire','r2','buzz','terabox','1fichier','onedrive','buzzheavier'].includes(l.type))
-    .map(l => ({ label: l.label, url: l.url, server: l.type, via: 'direct' }));
+  return _extractAllLinks(html).filter(l =>
+    ['gdrive','pixeldrain','mega','mediafire','r2','buzz','terabox','1fichier','onedrive','buzzheavier'].includes(l.type)
+  ).map(l => ({ label: l.label, url: l.url, server: l.type, via: 'direct' }));
+}
+
+async function _tryPostEndpoints(url, host, id, jar) {
+  const { rawGet, rawPost } = require('../http');
+  const baseUrl = `https://${host}`;
+  const endpoints = [
+    `${baseUrl}/api/download`,
+    `${baseUrl}/download`,
+    `${baseUrl}/view/${id}/download`,
+    `${baseUrl}/file/${id}`,
+  ];
+  for (const ep of endpoints) {
+    try {
+      const r = await rawPost(ep, { id, view_id: id }, { referer: url, jar, json: true });
+      let json;
+      try { json = JSON.parse(r.body); } catch (_) {}
+      if (json?.links || json?.servers || json?.data || json?.url) {
+        return _parseJsonLinks(json);
+      }
+      const links = _extractAllLinks(r.body);
+      if (links.length > 0) return links.map(l => ({ label: l.label, url: l.url, server: l.type, via: 'post' }));
+    } catch (_) {}
+  }
+  return [];
+}
+
+function _parseJsonLinks(json) {
+  const links = [];
+  const candidates = [json?.links, json?.servers, json?.data, json?.downloads, json?.urls];
+  for (const list of candidates) {
+    if (!Array.isArray(list)) continue;
+    for (const item of list) {
+      const url   = item?.url || item?.link || item?.href || item;
+      const label = item?.name || item?.label || item?.server || 'Server';
+      if (typeof url === 'string' && url.startsWith('http'))
+        links.push({ label, url, server: _guessServer(url), via: 'api' });
+    }
+    if (links.length > 0) break;
+  }
+  if (links.length === 0 && json?.url)
+    links.push({ label: 'Download Server', url: json.url, server: _guessServer(json.url), via: 'api' });
+  return links;
 }
 
 function _parseMeta(html, fallbackId) {
   const meta = {};
   const h    = html.match(/<(?:h[1-3]|title)[^>]*>([^<]{5,200}?)<\/(?:h[1-3]|title)>/i);
-  meta.filename = h ? h[1].trim().replace(/\s+/g, ' ') : fallbackId;
-  const sz      = html.match(/(\d+(?:\.\d+)?\s*(?:GB|MB|KB|TB))/i);
+  meta.filename = h ? h[1].trim().replace(/\s+/g,' ') : fallbackId;
+  const sz = html.match(/(\d+(?:\.\d+)?\s*(?:GB|MB|KB|TB))/i);
   if (sz) meta.size = sz[1];
   return meta;
+}
+
+function _guessServer(url) {
+  if (url.includes('drive.google'))  return 'gdrive';
+  if (url.includes('pixeldrain'))    return 'pixeldrain';
+  if (url.includes('mega.nz'))       return 'mega';
+  if (url.includes('mediafire'))     return 'mediafire';
+  if (url.includes('1drv'))          return 'onedrive';
+  if (url.includes('r2.cloudflare')) return 'r2';
+  if (url.includes('fuckingfast'))   return 'buzz';
+  if (url.includes('gofile'))        return 'gofile';
+  return 'other';
 }
 
 function _fmtSize(bytes) {
