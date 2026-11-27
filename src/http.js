@@ -3,61 +3,7 @@
 const https = require('https');
 const http  = require('http');
 const zlib  = require('zlib');
-const { HttpsProxyAgent } = require('https-proxy-agent');
-const { SocksProxyAgent } = require('socks-proxy-agent');
 
-// ── Proxy pool ────────────────────────────────────────────────────────────
-// Vercel env vars: PROXY_1, PROXY_2, ... ya PROXY_LIST=url1,url2,...
-function _loadProxyPool() {
-  const pool = [];
-  for (let i = 1; i <= 20; i++) {
-    const p = process.env[`PROXY_${i}`];
-    if (p) pool.push(p.trim());
-  }
-  const list = process.env.PROXY_LIST;
-  if (list) list.split(',').forEach(p => { const t = p.trim(); if (t) pool.push(t); });
-
-  if (pool.length === 0) console.warn('[http] no proxies configured -- direct connection');
-  else console.log(`[http] proxy pool: ${pool.length} proxies loaded`);
-  return pool;
-}
-
-const PROXY_POOL = _loadProxyPool();
-let _proxyIdx   = 0;
-
-function _getProxyAgent() {
-  if (!PROXY_POOL.length) return null;
-  const proxy = PROXY_POOL[_proxyIdx % PROXY_POOL.length];
-  _proxyIdx++;
-  try {
-    return proxy.startsWith('socks')
-      ? new SocksProxyAgent(proxy)
-      : new HttpsProxyAgent(proxy);
-  } catch (e) {
-    console.warn(`[http] bad proxy: ${proxy} -- ${e.message}`);
-    return null;
-  }
-}
-
-// ── Domains that go through proxy ─────────────────────────────────────────
-const PROXY_DOMAINS = [
-  'multicloudlinks.com',
-  'multicloudlinks.net',
-  'multicloudlinks.org',
-  'multidownload.click',
-  'reqinstant.multicloudlinks.com',
-  'viking.multicloudlinks.com',
-  'pixeldra.multicloudlinks.com',
-  'gdbazar.com',
-  'filebee.live',
-];
-
-function _needsProxy(url) {
-  if (!PROXY_POOL.length) return false;
-  return PROXY_DOMAINS.some(d => url.includes(d));
-}
-
-// ── Persistent direct agents ──────────────────────────────────────────────
 const HTTPS_AGENT = new https.Agent({
   keepAlive          : true,
   keepAliveMsecs     : 10000,
@@ -74,7 +20,6 @@ const HTTP_AGENT = new http.Agent({
   maxFreeSockets: 16,
 });
 
-// ── UA pool ───────────────────────────────────────────────────────────────
 const UA_POOL = [
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/158.0.0.0 Safari/537.36 Edg/158.0.0.0',
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
@@ -83,7 +28,7 @@ const UA_POOL = [
 ];
 
 const SEC_CH_MAP = {
-  'Edg/158'   : '"Chromium";v="158", "Not.A/Brand";v="24", "Microsoft Edge";v="158"',
+  'Edg/158' : '"Chromium";v="158", "Not.A/Brand";v="24", "Microsoft Edge";v="158"',
   'Chrome/124': '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
   'Chrome/123': '"Chromium";v="123", "Google Chrome";v="123", "Not-A.Brand";v="8"',
 };
@@ -93,11 +38,16 @@ function pickUA() {
 }
 
 function buildHeaders(ua, referer, extraHeaders = {}) {
+  // detect browser + version
   let secCH = SEC_CH_MAP['Chrome/124'];
   for (const [key, val] of Object.entries(SEC_CH_MAP)) {
     if (ua.includes(key)) { secCH = val; break; }
   }
   const plat = ua.includes('Macintosh') ? '"macOS"' : ua.includes('X11') ? '"Linux"' : '"Windows"';
+
+  // Sec-Fetch-Site: depends on referer vs request host
+  // default 'none' for direct navigation (no referer / google referer)
+  // 'same-origin' when referer matches the request host -- set per-call via extraHeaders
 
   const base = {
     'User-Agent'               : ua,
@@ -112,20 +62,20 @@ function buildHeaders(ua, referer, extraHeaders = {}) {
     'Sec-CH-UA-Platform'       : plat,
     'Sec-Fetch-Dest'           : 'document',
     'Sec-Fetch-Mode'           : 'navigate',
-    'Sec-Fetch-Site'           : 'none',
+    'Sec-Fetch-Site'           : 'none',   // ← fix: was missing, '?1' was Sec-Fetch-User
     'Sec-Fetch-User'           : '?1',
     'Priority'                 : 'u=0, i',
   };
 
   if (referer && !referer.includes('google.com')) {
     base['Referer']        = referer;
-    base['Sec-Fetch-Site'] = 'same-origin';
+    base['Sec-Fetch-Site'] = 'same-origin'; // override when referer is set
   }
 
+  // extraHeaders override everything -- caller knows best
   return { ...base, ...extraHeaders };
 }
 
-// ── Cookie jar ────────────────────────────────────────────────────────────
 class CookieJar {
   constructor() { this._m = new Map(); }
   ingest(arr = []) {
@@ -144,7 +94,6 @@ class CookieJar {
 
 const globalJar = new CookieJar();
 
-// ── Blocked domains ───────────────────────────────────────────────────────
 const BLOCKED = [
   'bonuscaf.com', 'bonusca.com', 'winexch.com', 'acscdn.com',
   'cleverwebserver.com', 'adsboosters', 'googletagmanager',
@@ -156,7 +105,6 @@ function isBlocked(url) {
   return BLOCKED.some(d => url.includes(d));
 }
 
-// ── rawGet ────────────────────────────────────────────────────────────────
 function rawGet(url, opts = {}) {
   return new Promise((resolve, reject) => {
     const {
@@ -166,7 +114,6 @@ function rawGet(url, opts = {}) {
       jar          = globalJar,
       ua           = pickUA(),
       referer      : initReferer,
-      useProxy     : forceProxy = false,
     } = opts;
 
     let hops           = maxRedirects;
@@ -179,15 +126,11 @@ function rawGet(url, opts = {}) {
       try { parsed = new URL(cur); }
       catch (e) { return reject(new Error(`Bad URL: ${cur}`)); }
 
-      const isHttps    = parsed.protocol === 'https:';
-      const lib        = isHttps ? https : http;
-      const useProxyNow = forceProxy || _needsProxy(cur);
-      const agent      = useProxyNow
-        ? (_getProxyAgent() || (isHttps ? HTTPS_AGENT : HTTP_AGENT))
-        : (isHttps ? HTTPS_AGENT : HTTP_AGENT);
+      const isHttps = parsed.protocol === 'https:';
+      const lib     = isHttps ? https : http;
+      const agent   = isHttps ? HTTPS_AGENT : HTTP_AGENT;
 
-      if (useProxyNow) console.log(`[http] proxy→ ${cur.slice(0, 70)}`);
-
+      // build headers fresh each hop -- referer updates on each redirect
       const hdrs = {
         ...buildHeaders(ua, currentReferer, extraHeaders),
         'Cookie': jar.header(),
@@ -202,19 +145,22 @@ function rawGet(url, opts = {}) {
         timeout,
         headers : hdrs,
       }, (res) => {
+        // ingest cookies on every hop
         const sc = res.headers['set-cookie'];
         if (sc) jar.ingest(sc);
 
+        // handle redirects
         const loc = res.headers['location'];
         if ([301, 302, 303, 307, 308].includes(res.statusCode) && loc) {
           if (hops-- <= 0) return reject(new Error('Too many redirects'));
           const next = loc.startsWith('http') ? loc : new URL(loc, cur).href;
           if (isBlocked(next)) return reject(new Error(`Blocked redirect: ${next}`));
           res.resume();
-          currentReferer = cur;
+          currentReferer = cur;   // ← update referer to current page on each hop
           return doReq(next);
         }
 
+        // decompress body
         const chunks = [];
         let stream   = res;
         const enc    = (res.headers['content-encoding'] || '').toLowerCase();
@@ -226,7 +172,7 @@ function rawGet(url, opts = {}) {
         stream.on('error', reject);
         stream.on('end',   () => resolve({
           body    : Buffer.concat(chunks).toString('utf8'),
-          finalUrl: cur,
+          finalUrl: cur,          // ← signed URL after all redirects
           status  : res.statusCode,
           headers : res.headers,
         }));
@@ -241,29 +187,23 @@ function rawGet(url, opts = {}) {
   });
 }
 
-// ── rawPost ───────────────────────────────────────────────────────────────
 function rawPost(url, body, opts = {}) {
   return new Promise((resolve, reject) => {
     const {
-      timeout  = 10000,
-      json     = false,
-      jar      = globalJar,
-      ua       = pickUA(),
-      headers  : extraHeaders = {},
-      referer  : initReferer,
-      useProxy : forceProxy = false,
+      timeout = 10000,
+      json    = false,
+      jar     = globalJar,
+      ua      = pickUA(),
+      headers : extraHeaders = {},
+      referer : initReferer,
     } = opts;
 
-    const parsed    = new URL(url);
-    const isHttps   = parsed.protocol === 'https:';
-    const lib       = isHttps ? https : http;
-    const useProxyNow = forceProxy || _needsProxy(url);
-    const agent     = useProxyNow
-      ? (_getProxyAgent() || (isHttps ? HTTPS_AGENT : HTTP_AGENT))
-      : (isHttps ? HTTPS_AGENT : HTTP_AGENT);
-
-    const data = json ? JSON.stringify(body) : new URLSearchParams(body).toString();
-    const ct   = json ? 'application/json' : 'application/x-www-form-urlencoded';
+    const parsed  = new URL(url);
+    const isHttps = parsed.protocol === 'https:';
+    const lib     = isHttps ? https : http;
+    const agent   = isHttps ? HTTPS_AGENT : HTTP_AGENT;
+    const data    = json ? JSON.stringify(body) : new URLSearchParams(body).toString();
+    const ct      = json ? 'application/json' : 'application/x-www-form-urlencoded';
 
     const hdrs = {
       ...buildHeaders(ua, initReferer, extraHeaders),
@@ -288,7 +228,7 @@ function rawPost(url, body, opts = {}) {
       if ([301, 302, 303].includes(res.statusCode) && loc) {
         res.resume();
         const next = loc.startsWith('http') ? loc : new URL(loc, url).href;
-        return rawGet(next, { referer: url, jar, ua, useProxy: forceProxy }).then(resolve).catch(reject);
+        return rawGet(next, { referer: url, jar, ua }).then(resolve).catch(reject);
       }
 
       const chunks = [];
@@ -317,4 +257,4 @@ function rawPost(url, body, opts = {}) {
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-module.exports = { rawGet, rawPost, sleep, globalJar, CookieJar, pickUA, isBlocked, _needsProxy };
+module.exports = { rawGet, rawPost, sleep, globalJar, CookieJar, pickUA, isBlocked };
