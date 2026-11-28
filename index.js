@@ -544,6 +544,7 @@ const SITE_ROUTES = [
   'mcloud',
   'driveseed',
   'filepress',
+  'mobilejsr',
 ];
 
 for (const siteId of SITE_ROUTES) {
