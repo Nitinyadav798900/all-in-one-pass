@@ -15,6 +15,7 @@ const SITE_FILES = [
   'gdflix.js',
   'mcloud.js',
   'fastdl.js',
+  'mobilejsr.js',
 ];
 
 class SiteRegistry {
