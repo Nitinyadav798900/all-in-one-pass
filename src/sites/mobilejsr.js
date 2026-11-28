@@ -8,7 +8,7 @@ class MobileJSR extends BaseSite {
     super();
     this.name    = 'MobileJSR';
     this.id      = 'mobilejsr';
-    this.version = '1.0.0';
+    this.version = '1.1.0';
     this.domains = [
       'mobilejsr.best',
       'mobilejsr.com',
@@ -25,7 +25,9 @@ class MobileJSR extends BaseSite {
 
   validate(html) {
     return {
-      valid : html.includes('encoded') || html.includes('base64') || html.includes('fastdl') || html.includes('hidden-content'),
+      valid : html.includes('encoded') || html.includes('base64') ||
+              html.includes('fastdl')  || html.includes('hidden-content') ||
+              html.includes('mcloud')  || html.includes('filebee'),
       reason: 'Missing MobileJSR structure',
     };
   }
@@ -34,22 +36,45 @@ class MobileJSR extends BaseSite {
     const { slug, host } = this.extract(url);
     const jar = new CookieJar();
 
-    const page = await rawGet(url, {
-      jar,
-      referer: `https://${host}/`,
-      headers: {
-        'Accept'                   : 'text/html,application/xhtml+xml,*/*;q=0.8',
-        'Upgrade-Insecure-Requests': '1',
-      },
-      timeout: 15000,
-    });
+    // try with and without trailing slash
+    const urls = [
+      url.endsWith('/') ? url : url + '/',
+      url.endsWith('/') ? url.slice(0, -1) : url,
+    ];
 
-    if (page.status === 404) throw new Error(`MobileJSR: post not found (${slug})`);
-    if (page.status >= 400) throw new Error(`MobileJSR: HTTP ${page.status}`);
+    let page, lastErr;
+
+    for (const tryUrl of urls) {
+      try {
+        page = await rawGet(tryUrl, {
+          jar,
+          referer: 'https://www.google.com/',
+          headers: {
+            'Accept'                   : 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'Accept-Language'          : 'en-US,en;q=0.9',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest'           : 'document',
+            'Sec-Fetch-Mode'           : 'navigate',
+            'Sec-Fetch-Site'           : 'none',
+            'Sec-Fetch-User'           : '?1',
+            'Cache-Control'            : 'max-age=0',
+          },
+          timeout: 20000,
+        });
+        if (page.status < 400) break;
+        lastErr = new Error(`MobileJSR: HTTP ${page.status}`);
+      } catch (e) {
+        lastErr = e;
+      }
+    }
+
+    if (!page || page.status >= 400) {
+      throw lastErr || new Error('MobileJSR: all attempts failed');
+    }
 
     const html = page.body || '';
 
-    // ── Method 1: base64 encoded HTML (most common) ───────────────────
+    // base64 pehle try karo, phir direct
     const servers = _extractFromBase64(html) || _extractDirect(html);
 
     if (!servers || servers.length === 0) {
@@ -62,10 +87,9 @@ class MobileJSR extends BaseSite {
   }
 }
 
-// ── Extract links from base64 encoded block ───────────────────────────────
+// ── base64 encoded block se links nikalo ──────────────────────────────────
 
 function _extractFromBase64(html) {
-  // const encoded = "BASE64STRING";
   const b64Match = html.match(/const\s+encoded\s*=\s*["']([A-Za-z0-9+/=]{50,})["']/);
   if (!b64Match) return null;
 
@@ -76,16 +100,19 @@ function _extractFromBase64(html) {
     return null;
   }
 
-  return _parseLinks(decoded);
+  console.log('[mobilejsr] base64 decoded, length:', decoded.length);
+  const links = _parseLinks(decoded);
+  return links.length > 0 ? links : null;
 }
 
-// ── Extract links directly from HTML ─────────────────────────────────────
+// ── direct HTML se links nikalo ───────────────────────────────────────────
 
 function _extractDirect(html) {
-  return _parseLinks(html);
+  const links = _parseLinks(html);
+  return links.length > 0 ? links : null;
 }
 
-// ── Parse all download links from HTML ───────────────────────────────────
+// ── sab download links parse karo ────────────────────────────────────────
 
 function _parseLinks(html) {
   const links = [], seen = new Set();
@@ -97,19 +124,19 @@ function _parseLinks(html) {
 
   let m;
 
-  // fastdl.rest
+  // fastdl.rest — G-Direct [Instant]
   const fdRe = /href=["'](https?:\/\/fastdl\.[a-z]+\/[^"']+)["']/gi;
   while ((m = fdRe.exec(html)) !== null) push('G-Direct [Instant]', m[1], 'fastdl');
 
-  // mcloud.best
+  // mcloud.best — M-Cloud [Resumable]
   const mcRe = /href=["'](https?:\/\/mcloud\.best\/[^"']+)["']/gi;
   while ((m = mcRe.exec(html)) !== null) push('M-Cloud [Resumable]', m[1], 'mcloud');
 
-  // m-drive.lol
+  // m-drive.lol — M-Drive [Multi]
   const mdRe = /href=["'](https?:\/\/m-drive\.[a-z]+\/[^"']+)["']/gi;
   while ((m = mdRe.exec(html)) !== null) push('M-Drive [Multi]', m[1], 'mdrive');
 
-  // filebee.live
+  // filebee.live — FileBee [G-Drive]
   const fbRe = /href=["'](https?:\/\/filebee\.live\/[^"']+)["']/gi;
   while ((m = fbRe.exec(html)) !== null) push('FileBee [G-Drive]', m[1], 'filebee');
 
@@ -157,16 +184,21 @@ function _parseLinks(html) {
   const ffRe = /href=["'](https?:\/\/fuckingfast\.net\/[^"']+)["']/gi;
   while ((m = ffRe.exec(html)) !== null) push('FuckingFast', m[1], 'fuckingfast');
 
-  // vegadrive buttons (data-server-name attribute)
-  const vgRe = /<a[^>]+class=["'][^"']*vegadrive-destination-button[^"']*["'][^>]+href=["']([^"']+)["'][^>]*data-server-name=["']([^"']+)["']/gi;
-  while ((m = vgRe.exec(html)) !== null) {
-    push(_guessLabel(m[2]), m[1], m[2]);
-  }
-  // also reversed attr order
-  const vgRe2 = /data-server-name=["']([^"']+)["'][^>]*href=["']([^"']+)["'][^>]*class=["'][^"']*vegadrive-destination-button[^"']*["']/gi;
-  while ((m = vgRe2.exec(html)) !== null) {
-    push(_guessLabel(m[1]), m[2], m[1]);
-  }
+  // vegadrive destination buttons — href + data-server-name
+  const vgRe = /href=["']([^"']+)["'][^>]*data-server-name=["']([^"']+)["']/gi;
+  while ((m = vgRe.exec(html)) !== null) push(_guessLabel(m[2]), m[1], m[2]);
+
+  // vegadrive — reversed attr order
+  const vgRe2 = /data-server-name=["']([^"']+)["'][^>]*href=["']([^"']+)["']/gi;
+  while ((m = vgRe2.exec(html)) !== null) push(_guessLabel(m[1]), m[2], m[1]);
+
+  // mediafire
+  const mfRe = /href=["'](https?:\/\/[^"']*mediafire[^"']+)["']/gi;
+  while ((m = mfRe.exec(html)) !== null) push('MediaFire', m[1], 'mediafire');
+
+  // onedrive
+  const odRe = /href=["'](https?:\/\/1drv\.ms\/[^"']+|https?:\/\/onedrive\.live[^"']+)["']/gi;
+  while ((m = odRe.exec(html)) !== null) push('OneDrive', m[1], 'onedrive');
 
   return links;
 }
@@ -189,7 +221,7 @@ function _parseMeta(html, fallbackId) {
   const meta  = { filename: fallbackId };
   const title = html.match(/<h1[^>]*class=["'][^"']*entry-title[^"']*["'][^>]*>([^<]{5,300})<\/h1>/i)
              || html.match(/<title[^>]*>([^<]{5,200})<\/title>/i);
-  if (title) meta.title = title[1].trim().replace(/\s*[-|]\s*[^-|]+$/, '');
+  if (title) meta.title = title[1].trim().replace(/\s*[-|]\s*[^-|]+$/, '').trim();
   return meta;
 }
 
