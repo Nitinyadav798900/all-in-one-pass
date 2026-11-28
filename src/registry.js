@@ -14,6 +14,7 @@ const SITE_FILES = [
   'pixeldrain.js',
   'gdflix.js',
   'mcloud.js',
+  'fastdl.js',
 ];
 
 class SiteRegistry {
